@@ -37,7 +37,7 @@ class ExpRelaxedCategorical(Distribution):
     See also: :func:`torch.distributions.OneHotCategorical`
 
     Args:
-        temperature (Tensor): relaxation temperature
+        temperature (float): relaxation temperature
         probs (Tensor): event probabilities
         logits (Tensor): unnormalized log probability for each event
 
@@ -284,28 +284,38 @@ class SafeOneHotCategoricalStraightThrough(TransformedDistribution,TorchDistribu
         return self.base_dist.probs
 '''
 
-
 class RelaxedQuantizeCategorical(torch.autograd.Function):
-    def __init__(self, temperature):
-        self.temperature=temperature
+    temperature = None  # Default temperature
+    epsilon = 1e-10    # Default epsilon
+
+    @staticmethod
+    def set_temperature(new_temperature):
+        RelaxedQuantizeCategorical.temperature = new_temperature
+
+    @staticmethod
+    def set_epsilon(new_epsilon):
+        RelaxedQuantizeCategorical.epsilon = new_epsilon
 
     @staticmethod
     def forward(ctx, soft_value):
+        temperature = float(RelaxedQuantizeCategorical.temperature)
+        epsilon = RelaxedQuantizeCategorical.epsilon
         uniforms = clamp_probs(
             torch.rand(soft_value.shape, dtype=soft_value.dtype, device=soft_value.device)
         )
         gumbels = -((-(uniforms.log())).log())
-        scores = (soft_value + gumbels) / 0.1 #Hardcoded temperature as 0.1 since couldn't figure out how to pass this val in
-        outs=scores - scores.logsumexp(dim=-1, keepdim=True)
-        outs=outs.exp()
-        outs=outs+1e-10#this eps should be possible to change?
-        hard_value=(outs/outs.sum(1,keepdim=True)).log()
+        scores = (soft_value + gumbels) / temperature
+        outs = scores - scores.logsumexp(dim=-1, keepdim=True)
+        outs = outs.exp()
+        outs = outs + epsilon  # Use the class variable epsilon
+        hard_value = (outs / outs.sum(1, keepdim=True)).log()
         hard_value._unquantize = soft_value
         return hard_value
 
     @staticmethod
     def backward(ctx, grad):
         return grad
+
 
 class ExpRelaxedCategoricalStraightThrough(Distribution):
     arg_constraints = {"probs": constraints.simplex, "logits": constraints.real_vector}
@@ -314,9 +324,12 @@ class ExpRelaxedCategoricalStraightThrough(Distribution):
     )  # The true support is actually a submanifold of this.
     has_rsample = True
 
-    def __init__(self, temperature, probs=None, logits=None, validate_args=None):
+    def __init__(self, temperature, probs=None, logits=None, validate_args=None, epsilon=1e-10):
         self._categorical = Categorical(probs, logits)
         self.temperature = temperature
+        RelaxedQuantizeCategorical.set_temperature(temperature)
+        RelaxedQuantizeCategorical.set_epsilon(epsilon)
+        
         batch_shape = self._categorical.batch_shape
         event_shape = self._categorical.param_shape[-1:]
         super().__init__(batch_shape, event_shape, validate_args=validate_args)
@@ -348,7 +361,6 @@ class ExpRelaxedCategoricalStraightThrough(Distribution):
         return self._categorical.probs
 
     def rsample(self, sample_shape=torch.Size()):
-        #soft_value=self.logits - self.logits.logsumexp(dim=-1, keepdim=True)
         outs=RelaxedQuantizeCategorical.apply(self.logits)
         return outs
 
@@ -389,6 +401,7 @@ class SafeAndRelaxedOneHotCategoricalStraightThrough(TransformedDistribution,Tor
     @property
     def probs(self):
         return self.base_dist.probs
+
 
 
 from numbers import Number
@@ -451,7 +464,6 @@ class TorchGeneralizedNormal(torch.distributions.exp_family.ExponentialFamily):
         return torch.where(x_is_zero, half, torch.where(x > zero, one - half_gamma, half_gamma))
 
     def cdf(self, value):
-        print('cdf')
         if self._validate_args:
             self._validate_sample(value)
         return self._cdf_zero_mean(value - self.loc)
