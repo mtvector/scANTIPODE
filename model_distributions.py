@@ -304,14 +304,14 @@ class RelaxedQuantizeCategorical(torch.autograd.Function):
             torch.rand(soft_value.shape, dtype=soft_value.dtype, device=soft_value.device)
         )
         gumbels = -((-(uniforms.log())).log())
-        scores = (soft_value + gumbels) / temperature
-        outs = scores - scores.logsumexp(dim=-1, keepdim=True)
-        outs = outs.exp()
-        outs = outs + epsilon  # Use the class variable epsilon
-        hard_value = (outs / outs.sum(1, keepdim=True)).log()
+        scores = (soft_value + gumbels) / 0.1 #Hardcoded temperature as 0.1 since couldn't figure out how to pass this val in
+        outs=scores - scores.logsumexp(dim=-1, keepdim=True)
+        outs=outs.exp()
+        outs=outs+1e-10#this eps should be possible to change?
+        hard_value=(outs/outs.sum(1,keepdim=True)).log()
         hard_value._unquantize = soft_value
         return hard_value
-
+        
     @staticmethod
     def backward(ctx, grad):
         return grad

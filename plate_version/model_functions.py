@@ -126,6 +126,28 @@ def batch_torch_outputs(inputs,function,batch_size=2048,device='cuda'):
         final_outs=[torch.cat(out_list[i],dim=0) for i in range(num_outs)]
         return(final_outs)    
 
+def indexing_none_list(n):
+    '''create unsqueeze n times. Negative values go to the end of the list; positive the front'''
+    none_list = [...]
+    if n == 0:
+        return none_list
+    abs_n = abs(n)
+
+    for _ in range(abs_n):
+        if n < 0:
+            none_list.append(None)
+        else:
+            none_list.insert(0, None)
+    return none_list
+
+def fest(tensors,unsqueeze=0,epsilon=1e-10):
+    '''flexible_einsum_scale_tensor, first dimension must be equal for list of tensors'''
+    einsum_str = ','.join(f'z{chr(65 + i)}' for i, _ in enumerate(tensors))
+    einsum_str += '->' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
+    #tensors=[x+epsilon for x in tensors]
+    out=torch.einsum(einsum_str, *[x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
+    return [poutine.scale(scale=out+epsilon)]
+
 class ZLEncoder(nn.Module):
     '''
     Takes tensor of size (batch,num_var) input (for now)
