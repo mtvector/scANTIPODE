@@ -403,7 +403,7 @@ class SafeAndRelaxedOneHotCategoricalStraightThrough(TransformedDistribution,Tor
         return self.base_dist.probs
 
 
-
+#Currently not working with gradients? (Not used)
 from numbers import Number
 from numbers import Real
 class TorchGeneralizedNormal(torch.distributions.exp_family.ExponentialFamily):
