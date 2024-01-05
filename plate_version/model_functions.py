@@ -314,6 +314,19 @@ def add_cats_uns(adata,column,uns_name=None):
         uns_name=column+'_cats'
     adata.uns[uns_name]=dict(zip([str(x) for x in adata.obs[column].cat.categories],[str(x) for x in sorted(set(adata.obs[column].cat.codes))]))
 
+def gen_exponential_decay(a):
+    def exponential_decay(x, k):
+        return k - (k - 1) * torch.exp(-a * x)
+    return exponential_decay  # Corrected to return the inner function
+
+def gen_linear_function(n, start_point):
+    def linear_function(x, k):
+        if x < start_point:
+            return 1
+        else:
+            return 1 + ((k - 1) / (n - start_point)) * (x - start_point)
+    return linear_function
+
 def make_dataloader(origdata=None,adata_path=None,batch_size=32):
     '''
     Loads anndata chunks (specific for development dataset)
