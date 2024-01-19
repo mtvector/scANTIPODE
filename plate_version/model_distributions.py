@@ -24,7 +24,7 @@ from pyro.ops.indexing import Vindex
 from pyro.distributions.torch_distribution import TorchDistributionMixin
 import scanpy as sc
 import math
-
+from pyro.distributions.torch import RelaxedBernoulli, RelaxedOneHotCategorical
 
 class SafeExpRelaxedCategorical(ExpRelaxedCategorical):
     #Thanks @fritzo
@@ -89,7 +89,7 @@ class SafeAndRelaxedOneHotCategorical(TransformedDistribution,TorchDistributionM
     def probs(self):
         return self.base_dist.probs
 
-
+"""
 class RelaxedQuantizeCategorical(torch.autograd.Function):
     temperature = None  # Default temperature
     epsilon = 1e-10    # Default epsilon
@@ -207,4 +207,32 @@ class SafeAndRelaxedOneHotCategoricalStraightThrough(TransformedDistribution,Tor
     @property
     def probs(self):
         return self.base_dist.probs
+"""
 
+class SafeAndRelaxedOneHotCategoricalStraightThrough(RelaxedOneHotCategorical):
+    def rsample(self, sample_shape=torch.Size()):
+        soft_sample = super().rsample(sample_shape)
+        soft_sample = clamp_probs(soft_sample)
+        hard_sample = QuantizeCategorical.apply(soft_sample)
+        hard_sample = hard_sample.clamp(min=torch.finfo(hard_sample.dtype).tiny)
+        #hard_sample = (hard_sample / hard_sample.sum(1, keepdim=True))
+        return hard_sample
+
+    def log_prob(self, value):
+        value = getattr(value, "_unquantize", value)
+        return super().log_prob(value)
+
+
+class QuantizeCategorical(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, soft_value):
+        argmax = soft_value.max(-1)[1]
+        hard_value = torch.zeros_like(soft_value)
+        hard_value._unquantize = soft_value
+        if argmax.dim() < hard_value.dim():
+            argmax = argmax.unsqueeze(-1)
+        return hard_value.scatter_(-1, argmax, 1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
