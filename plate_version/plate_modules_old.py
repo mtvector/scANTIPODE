@@ -133,10 +133,13 @@ class TreeEdges(MMB):
 
 
 class TreeConvergence(MMB):
-    def __init__(self, model):
+    def __init__(self, model,strictness=1.):
         super().__init__(model)
+        self.strictness=strictness
 
-    def model_sample(self,y1,level_edges,s=torch.ones(1)):
+    def model_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
         #In the model sample up from the leaves of y1 but use ideal propagated values
         levels=[y1[...,self.model.level_indices[i]:self.model.level_indices[i+1]] for i in range(len(self.model.level_sizes))]
         result=levels[-1]
@@ -146,28 +149,32 @@ class TreeConvergence(MMB):
             result=levels[i+1]@level_edges[i]
             results.append(result)
         results=results[::-1]
-
-        for i in range(len(self.model.level_sizes)):
-            pyro.sample('y_level_'+str(i),dist.Laplace(results[i],s.new_ones(results[i].shape)).to_event(1))
+        with poutine.scale(scale=strictness):
+            for i in range(len(self.model.level_sizes)):
+                pyro.sample('y_level_'+str(i),dist.Laplace(results[i],s.new_ones(results[i].shape)).to_event(1))
         
-        #Tree root prior is just a cost function (1 means no graph cycles,0 disconnected, >1 indicates cycles)
-        pyro.sample('tree_root',dist.Laplace(s.new_ones(1,1),s.new_ones(1,1)).to_event(1))
+            #Tree root prior is just a cost function (1 means no graph cycles,0 disconnected, >1 indicates cycles)
+            pyro.sample('tree_root',dist.Laplace(s.new_ones(1,1),s.new_ones(1,1)).to_event(1))
         return(results)
         
-    def guide_sample(self,y1,level_edges,s=torch.ones(1)):
+    def guide_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
         #In the guide, sample up y1, no edge propagation
         levels=[y1[...,self.model.level_indices[i]:self.model.level_indices[i+1]] for i in range(len(self.model.level_sizes))]
-        for i in range(len(self.model.level_sizes)):
-            pyro.sample('y_level_'+str(i),dist.Delta(levels[i]).to_event(1))
+        with poutine.scale(scale=strictness):
+            for i in range(len(self.model.level_sizes)):
+                pyro.sample('y_level_'+str(i),dist.Delta(levels[i]).to_event(1))
 
-        #But still need to propagate edges to get the root value (check for cycles)
-        results=[levels[-1]]
-        for i in range(len(self.model.level_sizes) - 2, -1, -1):
-            result=levels[i+1]@level_edges[i]
-            results.append(result)
-        results=results[::-1]
-        pyro.sample('tree_root',dist.Delta(results[0]).to_event(1))
+            #But still need to propagate edges to get the root value (check for cycles)
+            results=[levels[-1]]
+            for i in range(len(self.model.level_sizes) - 2, -1, -1):
+                result=levels[i+1]@level_edges[i]
+                results.append(result)
+            results=results[::-1]
+            pyro.sample('tree_root',dist.Delta(results[0]).to_event(1))
         return(results)
+
 
 
 #####################OLD MODULES##############

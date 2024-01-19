@@ -141,11 +141,14 @@ def indexing_none_list(n):
     return none_list
 
 def fest(tensors,unsqueeze=0,epsilon=1e-10):
-    '''flexible_einsum_scale_tensor, first dimension must be equal for list of tensors'''
-    einsum_str = ','.join(f'z{chr(65 + i)}' for i, _ in enumerate(tensors))
-    einsum_str += '->' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
-    #tensors=[x+epsilon for x in tensors]
+    '''
+    flexible_einsum_scale_tensor, first dimension must be equal for list of tensors
+    Multiplies out marginals to give joint
+    '''
+    einsum_str = ','.join(f'...z{chr(65 + i)}' for i, _ in enumerate(tensors))
+    einsum_str += '->...' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
     out=torch.einsum(einsum_str, *[x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
+    #print(out.shape)
     return [poutine.scale(scale=out+epsilon)]
 
 class ZLEncoder(nn.Module):

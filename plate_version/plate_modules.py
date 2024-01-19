@@ -103,7 +103,6 @@ class MAPHalfCauchyModule(MMB):
             return pyro.sample(self.param_name+'_sample',dist.Delta(p))
 
 
-
 class TreeEdges(MMB):
     def __init__(self, model,straight_through=True):
         super().__init__(model)
@@ -111,13 +110,13 @@ class TreeEdges(MMB):
         self.cat_dist= model_distributions.SafeAndRelaxedOneHotCategoricalStraightThrough if straight_through else model_distributions.SafeAndRelaxedOneHotCategorical
         
     def model_sample(self,s=torch.ones(1),approx=False):
+        level_edges=self.make_params(s)
         if approx:
             temp=1.0
         else:
             temp=0.1
         level_edges=[pyro.sample('edges_sample_'+str(i),
-                self.cat_dist(temperature=temp*torch.ones(1,device=s.device,requires_grad=False),
-                              logits=s.new_zeros(self.model.level_sizes[i+1],self.model.level_sizes[i])).to_event(1))
+                self.cat_dist(temperature=temp*torch.ones(1,device=s.device),logits=level_edges[i]).to_event(1))
                 for i in range(len(self.model.level_sizes)-1)]
         return(level_edges)
 
@@ -185,11 +184,13 @@ class TreeConvergence(MMB):
 
 
 class TreeConvergenceBottomUp(MMB):
-    def __init__(self, model):
+    def __init__(self, model,strictness=1.):
         super().__init__(model)
-
-    def model_sample(self,y1,level_edges,s=torch.ones(1)):
-        #In the model sample up from the leaves of y1 but use ideal propagated values
+        self.strictness=strictness
+        
+    def model_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
         results=[y1]
         #Propagate from bottom to top
         for i in range(len(self.model.level_sizes) - 1):
@@ -198,16 +199,26 @@ class TreeConvergenceBottomUp(MMB):
         results=results[::-1]
         
         #Tree root prior is just a cost function (1 means no graph cycles,0 disconnected, >1 indicates cycles)
-        pyro.sample('tree_root',dist.Laplace(s.new_ones(1,1),s.new_ones(1,1)).to_event(1))
+        with poutine.scale(scale=strictness):
+            pyro.sample('tree_root',dist.Laplace(s.new_ones(1,1),s.new_ones(1,1)).to_event(1))
         return(results)
 
-    def guide_sample(self,y1,level_edges,s=torch.ones(1)):
-        #But still need to propagate edges to get the root value (check for cycles)
+    def guide_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
         results=[y1]
         for i in range(len(self.model.level_sizes) - 1):
             result=results[i]@level_edges[-(i+1)]
             results.append(result)
         results=results[::-1]
-        pyro.sample('tree_root',dist.Delta(results[0]).to_event(1))
+        with poutine.scale(scale=strictness):
+            pyro.sample('tree_root',dist.Delta(results[0]).to_event(1))
         return(results)
 
+    def just_propagate(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        results=[y1]
+        for i in range(len(self.model.level_sizes) - 1):
+            result=results[i]@level_edges[-(i+1)]
+            results.append(result)
+        results=results[::-1]
+        return(results)
