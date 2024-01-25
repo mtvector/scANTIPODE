@@ -14,6 +14,7 @@ import pyro.poutine as poutine
 from pyro.ops.indexing import Vindex
 import scanpy as sc
 import math
+import scvi
 
 def null_function(x):
     return x
@@ -33,6 +34,9 @@ def safe_softmax(x,dim=-1):
 def minmax(x):
     return(x.min(),x.max())
 
+def moving_average(x, w):
+    return np.convolve(x, np.ones(w), 'valid') / w
+
 def csr_to_sparsetensor(x):
     '''
     Convert scipy csr sparse matrix to sparse tensor
@@ -42,65 +46,19 @@ def csr_to_sparsetensor(x):
                               torch.Tensor(coo.data.astype(np.float64))))
  
 
-def make_fc(dims,dropout=False):
-    '''
-    Helper for making fully-connected neural networks from tutorial
-    '''
-    layers = []
-    for in_dim, out_dim in zip(dims, dims[1:]):
-        layers.append(nn.Linear(in_dim, out_dim,bias=False))
-        if dropout:
-            layers.append(nn.Dropout(0.05))
-        layers.append(nn.BatchNorm1d(out_dim))
-        layers.append(nn.LeakyReLU())
-    return nn.Sequential(*layers[:-1])  # Exclude final ReLU non-linearity
+def param_store_to_numpy():
+    store={}
+    for name in pyro.get_param_store():
+        store[name]=pyro.param(name).cpu().detach().numpy()
+    return store
 
-def enumeratable_bn(x,bn):
-    '''
-    Batch norm that can work with categorical enumeration, from scANVI tutorial
-    '''
-    if len(x.shape) > 2:
-        _x = x.reshape(-1, x.size(-1))
-        _x=bn(_x)
-        x = _x.reshape(x.shape[:-1] + _x.shape[-1:])
-    else:
-        x=bn(x)
-    return(x)
-
-def split_in_half(t):
-    '''
-    Splits a tensor in half along the final dimension from tutorial
-    '''
-    return t.reshape(t.shape[:-1] + (2, -1)).unbind(-2)
-
-def stick_break(beta):
-    '''
-    Stick breaking process using Beta distributed values along the last dimension
-    '''
-    beta1m_cumprod = (1 - beta).cumprod(-1)
-    return torch.nn.functional.pad(beta, (0, 1), value=1) * torch.nn.functional.pad(beta1m_cumprod, (1, 0), value=1)
-
-def init_kaiming_weight(wt):
-    '''
-    Initialize weights by kaiming uniform
-    '''
-    torch.nn.init.kaiming_uniform_(wt, a=math.sqrt(5))
-    
-def init_uniform_bias(bs,wt):
-    '''
-    Initialize biases by kaiming uniform
-    '''
-    fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(wt)
-    bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-    torch.nn.init.uniform_(bs, -bound, bound)    
-    
 def batch_torch_outputs(inputs,function,batch_size=2048,device='cuda'):
     '''
     Take a tensor of inputs
 
         Args:
         inputs ([Tensor]): List of input tensors to be batched along 0 dimension
-        function (function(Tensor)): event probabilities
+        function (function(Tensor)): Torch module with forward() method implemented, like a classifier
         batch_size (integer): number along 0 dim per batch
         device (string): ('cuda','cpu',...)
     '''
@@ -126,8 +84,54 @@ def batch_torch_outputs(inputs,function,batch_size=2048,device='cuda'):
         final_outs=[torch.cat(out_list[i],dim=0) for i in range(num_outs)]
         return(final_outs)    
 
+#Make full dataloader first
+def batch_output_from_dataloader(dataloader,function,batch_size=2048,device='cuda'):
+    '''
+    Take a tensor of inputs
+
+        Args:
+        dataloader ([AnnDataLoader]): AnnDataLoader that only returns what's needed for function (torch module)
+        function (function(Tensor)): Torch module with forward() method implemented, like a classifier
+        batch_size (integer): number along 0 dim per batch
+        device (string): ('cuda','cpu',...)
+    '''
+    out_list=[[]]
+    function.to(device)
+    function.eval()
+    with torch.no_grad():
+        for x in tqdm.tqdm(dataloader):
+            x=[x[k].to(device) for k in x.keys()]
+            outs=function(*x)
+            num_outs=len(outs)
+            if num_outs==1:
+                out_list[0].append(outs.to('cpu'))
+            else:
+                for j in range(num_outs):
+                    if j==len(out_list):
+                        out_list.append([outs[j].to('cpu')])
+                    else:
+                        out_list[j].append(outs[j].to('cpu'))
+
+        final_outs=[torch.cat(out_list[i],dim=0) for i in range(num_outs)]
+        return(final_outs)    
+
+def get_antipode_outputs(antipode_model,batch_size=2048,device='cuda'):
+    design_matrix=False  #3x faster
+    if 'species_onehot' not in antipode_model.adata_manager.adata.obsm.keys():
+        antipode_model.adata_manager.adata.obsm['species_onehot']=numpy_onehot(antipode_model.adata_manager.adata.obs['species'].cat.codes)
+    antipode_model.adata_manager.register_new_fields([scvi.data.fields.ObsmField('species_onehot','species_onehot')])
+
+    field_types={"s":np.float32,"species_onehot":np.float32}
+    dataloader=scvi.dataloaders.AnnDataLoader(antipode_model.adata_manager,batch_size=32,drop_last=False,shuffle=False,data_and_attributes=field_types)#supervised_field_types for supervised step 
+    encoder_outs=batch_output_from_dataloader(dataloader,antipode_model.zl_encoder,batch_size=batch_size,device=device)
+    encoder_outs[0]=antipode_model.z_transform(encoder_outs[0])
+    encoder_out=[x.detach().cpu().numpy() for x in encoder_outs]
+    classifier_outs=batch_torch_outputs([(antipode_model.z_transform(encoder_outs[0]))],antipode_model.classifier,batch_size=2048,device='cuda')
+    classifier_out=[x.detach().cpu().numpy() for x in classifier_outs]
+    return encoder_out,classifier_out
+
 def indexing_none_list(n):
-    '''create unsqueeze n times. Negative values go to the end of the list; positive the front'''
+    '''create unsqueeze n times. Negative values go to the end of the list; positive the front (for fest)'''
     none_list = [...]
     if n == 0:
         return none_list
@@ -143,7 +147,7 @@ def indexing_none_list(n):
 def fest(tensors,unsqueeze=0,epsilon=1e-10):
     '''
     flexible_einsum_scale_tensor, first dimension must be equal for list of tensors
-    Multiplies out marginals to give joint
+    Multiplies out marginals to construct joint
     '''
     einsum_str = ','.join(f'...z{chr(65 + i)}' for i, _ in enumerate(tensors))
     einsum_str += '->...' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
@@ -299,18 +303,36 @@ def exp_sum(a,b):
     '''
     return((a.exp()+b.exp()).log())
 
+def index_to_onehot(index, out_shape):
+    if sum(index.shape) == 1:
+        index=torch.zeros(out_shape)
+    else:
+        index=torch.nn.functional.one_hot(index.squeeze(),num_classes=out_shape[1]).float() if index.shape[-1]==1 else index
+    return index
+
+def numpy_onehot(x,num_classes=None):
+    n_values = np.max(x) + 1
+    if num_classes is None or num_classes<n_values:
+        num_classes=n_values
+    return np.eye(num_classes)[x]
+
 def oh_index(mat,ind):
     '''
     treat onehot as categorical index for 2d input
     '''
     return(torch.einsum('...ij,...bi->...bj',mat,ind))
 
+def oh_index1(mat,ind):
+    '''
+    treat onehot as categorical index for 3d input
+    '''
+    return(torch.einsum('...ijk,...bi->...bjk',mat,ind))
+
 def oh_index2(mat,ind):
     '''
     treat onehot as categorical index for 3d input
     '''
     return(torch.einsum('...bij,...bi->...bj',mat,ind))
-
 
 def add_cats_uns(adata,column,uns_name=None):
     if uns_name is None:
@@ -367,6 +389,58 @@ def make_dataloader(origdata=None,adata_path=None,batch_size=32):
     gc.collect()
     dataloader = torch.utils.data.DataLoader(d,sampler=sampler, batch_size=batch_size,drop_last=True)
     return(dataloader)
+
+def make_fc(dims,dropout=False):
+    '''
+    Helper for making fully-connected neural networks from tutorial
+    '''
+    layers = []
+    for in_dim, out_dim in zip(dims, dims[1:]):
+        layers.append(nn.Linear(in_dim, out_dim,bias=False))
+        if dropout:
+            layers.append(nn.Dropout(0.05))
+        layers.append(nn.BatchNorm1d(out_dim))
+        layers.append(nn.LeakyReLU())
+    return nn.Sequential(*layers[:-1])  # Exclude final ReLU non-linearity
+
+def enumeratable_bn(x,bn):
+    '''
+    Batch norm that can work with categorical enumeration, from scANVI tutorial
+    '''
+    if len(x.shape) > 2:
+        _x = x.reshape(-1, x.size(-1))
+        _x=bn(_x)
+        x = _x.reshape(x.shape[:-1] + _x.shape[-1:])
+    else:
+        x=bn(x)
+    return(x)
+
+def split_in_half(t):
+    '''
+    Splits a tensor in half along the final dimension from tutorial
+    '''
+    return t.reshape(t.shape[:-1] + (2, -1)).unbind(-2)
+
+def stick_break(beta):
+    '''
+    Stick breaking process using Beta distributed values along the last dimension
+    '''
+    beta1m_cumprod = (1 - beta).cumprod(-1)
+    return torch.nn.functional.pad(beta, (0, 1), value=1) * torch.nn.functional.pad(beta1m_cumprod, (1, 0), value=1)
+
+def init_kaiming_weight(wt):
+    '''
+    Initialize weights by kaiming uniform
+    '''
+    torch.nn.init.kaiming_uniform_(wt, a=math.sqrt(5))
+    
+def init_uniform_bias(bs,wt):
+    '''
+    Initialize biases by kaiming uniform
+    '''
+    fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(wt)
+    bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+    torch.nn.init.uniform_(bs, -bound, bound)    
 
 class SUConvModule(nn.Module):
     '''

@@ -104,11 +104,15 @@ class MAPHalfCauchyModule(MMB):
 
 
 class TreeEdges(MMB):
-    def __init__(self, model,straight_through=True):
+    def __init__(self, model,straight_through=True,zeros=True):
         super().__init__(model)
         self.straight_through=straight_through
         self.cat_dist= model_distributions.SafeAndRelaxedOneHotCategoricalStraightThrough if straight_through else model_distributions.SafeAndRelaxedOneHotCategorical
-        
+        if zeros:
+            self.init_fn=torch.zeros
+        else:
+            self.init_fn=torch.randn
+    
     def model_sample(self,s=torch.ones(1),approx=False):
         level_edges=self.make_params(s)
         if approx:
@@ -122,7 +126,7 @@ class TreeEdges(MMB):
 
     def make_params(self,s=torch.ones(1)):
         level_edges=[pyro.param('edges_'+str(i),
-                0.01*torch.randn(self.model.level_sizes[i+1],self.model.level_sizes[i]).to(s.device),
+                0.01*self.init_fn(self.model.level_sizes[i+1],self.model.level_sizes[i]).to(s.device),
                                 constraint=constraints.interval(-20,20)) 
                 for i in range(len(self.model.level_sizes)-1)]
         return(level_edges)
