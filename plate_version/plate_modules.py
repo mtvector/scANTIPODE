@@ -226,3 +226,54 @@ class TreeConvergenceBottomUp(MMB):
             results.append(result)
         results=results[::-1]
         return(results)
+
+    def clean_propagate(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        results=[numpy_hardmax(y1)]
+        for i in range(len(self.model.level_sizes) - 1):
+            result=results[i]@level_edges[-(i+1)]
+            results.append(numpy_hardmax(result))
+        results=results[::-1]
+        return(results)
+
+
+class TreeConvergenceMaxBottomUp(MMB):
+    def __init__(self, model,strictness=1.):
+        super().__init__(model)
+        self.strictness=strictness
+        self.cat_dist=model_distributions.SafeAndRelaxedOneHotCategoricalStraightThrough
+        
+    def model_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
+        results=[y1]
+        #Propagate from bottom to top
+        for i in range(len(self.model.level_sizes) - 1):
+            result=results[i]@level_edges[-(i+1)]
+            hard_dist = self.cat_dist(temperature = self.model.temperature * torch.ones(1,device=s.device), probs=result)
+            out=pyro.sample('harden_level_'+str(i),hard_dist)
+            print(result)
+            print(out)
+            results.append(out)
+        results=results[::-1]
+        
+        return(results)
+
+    def guide_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        if strictness is None:
+            strictness=self.strictness
+        results=[y1]
+        for i in range(len(self.model.level_sizes) - 1):
+            result=results[i]@level_edges[-(i+1)]
+            hard_dist = self.cat_dist(temperature = self.model.temperature * torch.ones(1,device=s.device), probs=result)
+            out=pyro.sample('harden_level_'+str(i),hard_dist)
+            results.append(out)
+        results=results[::-1]
+        return(results)
+
+    def just_propagate(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        results=[numpy_hardmax(y1)]
+        for i in range(len(self.model.level_sizes) - 1):
+            result=results[i]@level_edges[-(i+1)]
+            results.append(numpy_hardmax(result))
+        results=results[::-1]
+        return(results)
