@@ -115,15 +115,15 @@ class AntipodeTrainingMixin:
             if 'edge' in n:
                 pyro.get_param_store().__setitem__(n,pyro.param(n).new_zeros(pyro.param(n).shape))
         
-    def train_phase_2(self,max_steps,taxon_label='kmeans_onehot',print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=1,one_cycle_lr=False,steps=0,batch_size=32):
+    def train_phase_2(self,max_steps, taxon_label='kmeans_onehot', print_every=10000, device='cuda', max_learning_rate=0.001, num_particles=1, one_cycle_lr=False, steps=0, batch_size=32):
         '''empirically works best and fastest with one_cycle_lr=False'''
         steps=steps
         supervised_field_types=self.field_types.copy()
         supervised_fields=self.fields.copy()
         supervised_field_types["taxon"]=np.float32
         self.adata_manager.register_new_fields([make_field('taxon',('obsm',taxon_label))])
-        class_dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=batch_size,drop_last=True,shuffle=True,data_and_attributes=supervised_field_types)
-        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
+        class_dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager, batch_size=batch_size, drop_last=True, shuffle=True, data_and_attributes=supervised_field_types)
+        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps, 'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
         elbo = pyro.infer.JitTrace_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
         svi = SVI(self.model, self.guide, scheduler, elbo)
         
@@ -278,7 +278,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate])
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],[self.discov_plate,self.latent_plate2,self.var_plate])
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],[self.latent_plate2,self.var_plate],init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=False)
-        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=True)
+        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         self.zs=MAPLaplaceModule(self,'scales',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],init_val=0.01*torch.ones(self.num_labels,self.num_latent),constraint=constraints.positive,param_only=False)
         self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         
@@ -288,14 +288,14 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.z_transform=null_function#centered_sigmoid#torch.special.expit
 
         if self.design_matrix:
-            fields={'s':('layers','spliced'),
-            'discov_ind':('obsm','discov_onehot'),
-            'batch_ind':('obsm','batch_onehot')}
+            fields={'s':('layers',self.layer),
+            'discov_ind':('obsm',self.discov_key),
+            'batch_ind':('obsm',self.batch_key)}
             field_types={"s":np.float32,"batch_ind":np.float32,"discov_ind":np.float32}
         else:
-            fields={'s':('layers','spliced'),
-            'discov_ind':('obs','species'),
-            'batch_ind':('obs','batch_name')}
+            fields={'s':('layers',self.layer),
+            'discov_ind':('obs',self.discov_key),
+            'batch_ind':('obs',self.batch_key)}
             field_types={"s":np.float32,"batch_ind":np.int64,"discov_ind":np.int64}
 
         self.fields=fields
@@ -482,7 +482,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
 
                     taxon_probs=self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s,cur_strictness)
                     taxon_probs=torch.cat(taxon_probs,-1)
-                    
             locs=self.zl.guide_sample(s,scale=fest([taxon_probs],-1))
             scales=self.zs.guide_sample(s,scale=fest([taxon_probs],-1))
             locs_dynam=self.zld.guide_sample(s,scale=fest([taxon_probs],-1))
