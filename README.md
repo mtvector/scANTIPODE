@@ -1,4 +1,4 @@
-# scANTIPODE
+<h1 style="text-align: center;"> scANTIPODE</h1>
 
 ![antipode logo!](assets/antipode_logo.png)
 
