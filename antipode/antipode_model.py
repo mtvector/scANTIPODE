@@ -4,6 +4,7 @@ import sklearn
 from sklearn import cluster
 import pandas as pd
 import scanpy as sc
+import anndata
 import scvi
 import inspect
 import tqdm
@@ -24,6 +25,174 @@ import matplotlib.pyplot as plt
 import numpy as np
 import re
 from scvi.module.base import PyroBaseModuleClass
+
+from model_modules import *
+from model_distributions import *
+from model_functions import *
+from train_utils import *
+
+class AntipodeTrainingMixin:
+    '''
+    Mixin class providing functions to actually run ANTIPODE
+    can use supervised taxonomy by training only phase2
+    '''
+    
+    def save_params_to_uns(self,prefix=''):
+        pstore=param_store_to_numpy()
+        pstore={n:pstore[n] for n in pstore.keys() if not re.search('encoder|classifier',n)}
+        self.adata_manager.adata.uns[prefix+'param_store']=pstore
+
+    def store_outputs(self,device='cuda',prefix=''):
+        self.save_params_to_uns(prefix='')
+        self.to('cpu')
+        self.eval()
+        antipode_outs=get_antipode_outputs(self,batch_size=2048,device=device)
+        taxon=antipode_outs[1][0]
+        self.adata_manager.adata.obsm['X_antipode']=antipode_outs[0][0]
+        self.adata_manager.adata.obs['psi']=antipode_outs[1][1]
+        level_edges=[numpy_hardmax(self.adata_manager.adata.uns['param_store']['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
+        levels=self.tree_convergence_bottom_up.just_propagate(scipy.special.softmax(taxon[...,-self.level_sizes[-1]:],axis=-1),level_edges,s=torch.ones(1))
+        prop_taxon=np.concatenate(levels,axis=-1)
+        self.adata_manager.adata.obsm['taxon_probs']=prop_taxon
+        levels=self.tree_convergence_bottom_up.just_propagate(numpy_hardmax(levels[-1],axis=-1),level_edges,s=torch.ones(1))
+        for i in range(len(levels)):
+            cur_clust=prefix+'level_'+str(i)
+            self.adata_manager.adata.obs[cur_clust]=levels[i].argmax(1)
+            self.adata_manager.adata.obs[cur_clust]=self.adata_manager.adata.obs[cur_clust].astype(str)
+        self.adata_manager.adata.obs[prefix+'antipode_cluster'] = self.adata_manager.adata.obs.apply(lambda x: '_'.join([x[prefix+'level_'+str(i)] for i in range(len(levels))]), axis=1)
+    
+    def train_phase_1(self,max_steps,print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=3,one_cycle_lr=True,steps=0,batch_size=32):
+        #particle phase
+        steps=steps
+        print(self.fields)
+        print(self.field_types)
+        dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=32,drop_last=True,shuffle=True,data_and_attributes=self.field_types)#supervised_field_types for supervised step
+        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
+        elbo = pyro.infer.JitTrace_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
+        svi = SVI(self.model, self.guide, scheduler, elbo)
+        self.train()
+        self.zl_encoder.train()
+        
+        self=self.to(device)
+        self.set_approx(True)
+        loss_tracker=[]
+        pbar = tqdm.tqdm(total=max_steps, position=0)
+        done=False
+        while steps < max_steps:
+            for x in dataloader:
+                x['step']=torch.ones(1).to(device)*steps
+                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
+                loss=svi.step(*x)
+                steps+=1
+                if steps<max_steps-1:
+                    scheduler.step()
+                else:
+                    break
+                pbar.update(1)
+                loss_tracker.append(loss)
+                if steps%print_every == 0:
+                    # Tell the scheduler we've done one epoch.
+                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
+        
+        pbar.close()
+        allDone()
+        print("Finished training!")
+        return(loss_tracker)
+
+    def prepare_phase_2(self):
+        '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), runs kmeans, resets tree edges and locs'''
+        kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.level_sizes[-1],init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm['X_antipode'])
+        self.adata_manager.adata.obs['kmeans']=kmeans.labels_
+        self.adata_manager.adata.obs['kmeans']=self.adata_manager.adata.obs['kmeans'].astype(str).astype('category')
+        self.adata_manager.adata.obsm['kmeans_onehot']=numpy_onehot(self.adata_manager.adata.obs['kmeans'].cat.codes,num_classes=self.level_sizes[-1]) #yoh=yoh+1e-10;yoh=oh/oh.sum(-1).reshape(-1,1)#for relaxed
+        new_locs=torch.concatenate(
+            [pyro.param('locs').new_zeros(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1]),
+             torch.tensor(kmeans.cluster_centers_,device=pyro.param('locs').device)],
+             axis=0)
+        pyro.get_param_store().__setitem__('locs',new_locs)
+        pyro.get_param_store().__setitem__('locs_dynam',new_locs.new_zeros(new_locs.shape))
+        for n in pyro.get_param_store():
+            if 'edge' in n:
+                pyro.get_param_store().__setitem__(n,pyro.param(n).new_zeros(pyro.param(n).shape))
+        
+    def train_phase_2(self,max_steps,taxon_label='kmeans_onehot',print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=1,one_cycle_lr=False,steps=0,batch_size=32):
+        '''empirically works best and fastest with one_cycle_lr=False'''
+        steps=steps
+        supervised_field_types=self.field_types.copy()
+        supervised_fields=self.fields.copy()
+        supervised_field_types["taxon"]=np.float32
+        self.adata_manager.register_new_fields([make_field('taxon',('obsm',taxon_label))])
+        class_dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=batch_size,drop_last=True,shuffle=True,data_and_attributes=supervised_field_types)
+        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
+        elbo = pyro.infer.JitTrace_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
+        svi = SVI(self.model, self.guide, scheduler, elbo)
+        
+        self.train()
+        self=self.to(device)
+        self.set_approx(False)
+        loss_tracker=[]
+        #for steps in range(max_steps):
+        pbar = tqdm.tqdm(total=max_steps, position=0)
+        done=False
+        while steps < max_steps:
+            for x in class_dataloader:
+                x['step']=torch.ones(1).to(device)*steps
+                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
+                loss=svi.step(*x)
+                steps+=1
+                if steps<=max_steps-1:
+                    #scheduler.step()
+                    pass
+                else:
+                    break
+                pbar.update(1)
+                loss_tracker.append(loss)
+                if steps%print_every == 0:
+                    # Tell the scheduler we've done one epoch.
+                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
+        
+        pbar.close()
+        allDone()
+        print("Finished training!")
+        return(loss_tracker)
+        
+    def train_phase_3(self,max_steps,print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=3,one_cycle_lr=True,steps=0,batch_size=32):
+        steps=steps
+        dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=batch_size,drop_last=True,shuffle=True,data_and_attributes=self.field_types)#supervised_field_types for supervised step
+        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
+        elbo = pyro.infer.JitTraceEnum_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
+        svi = SVI(self.model, self.guide, scheduler, elbo)
+
+        loss_tracker=[]
+        self.train()
+        self=self.to(device)
+        self.set_approx(False)
+        
+        #for steps in range(max_steps):
+        pbar = tqdm.tqdm(total=max_steps, position=0)
+        done=False
+        while steps < max_steps:
+            for x in dataloader:
+                x['step']=torch.ones(1).to(device)*steps
+                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
+                loss=svi.step(*x)
+                steps+=1
+                if steps<max_steps-1:
+                    #scheduler.step()
+                    pass
+                else:
+                    break
+                pbar.update(1)
+                loss_tracker.append(loss)
+                if steps%print_every == 0:
+                    # Tell the scheduler we've done one epoch.
+                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
+        
+        pbar.close()
+        allDone()
+        print("Finished training!")
+        return(loss_tracker)
+
 
 class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     '''
@@ -47,6 +216,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     scale_factor (float, optional): Scaling factor for data normalization. If None, it is inferred from the data.
     prior_scale (float, optional): Scale of the Laplace prior distributions. Defaults to 100.
     dcd_prior (float, optional): Scale of the prior for the decoder. If None, defaults to a specific inferred value.
+    theta_prior (float, optional): Init value for the inverse dispersion of the negative binomial.
     decay_function (callable, optional): A function that defines the decay of certain parameters over iterations.
     max_strictness (float, optional): Maximum strictness parameter for tree convergence. Defaults to 1.
     bi_depth (int, optional): Depth of the tree for the approximation of batch by identity effects. Defaults to 2.
@@ -54,11 +224,13 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     classifier_hidden (list of int, optional): Sizes of hidden layers for the classifier network. Defaults to [3000, 3000, 3000].
     encoder_hidden (list of int, optional): Sizes of hidden layers for the encoder network. Defaults to [6000, 5000, 3000, 1000].
     '''
-    def __init__(self, adata, discov_pair, batch_pair, layer, num_var, level_sizes=[1, 10, 25, 50], 
-                 num_latent=50, scale_factor=None, prior_scale=100,dcd_prior=None,
-                 decay_function=None, max_strictness=1., bi_depth=2, num_batch_embed=10,
+    def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1, 10, 25, 50], 
+                 num_latent=50, scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,
+                 decay_function=None, max_strictness=1., bi_depth=2, num_batch_embed=10,theta_prior=50.0,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000]):
-        
+
+        pyro.clear_param_store()
+
         # Determine num_discov and num_batch from the AnnData object
         self.discov_loc, self.discov_key = discov_pair
         self.batch_loc, self.batch_key = batch_pair
@@ -70,7 +242,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self._setup_adata_manager_store: dict[str, type[scvi.data.AnnDataManager]] = {}
         self.num_var = adata.layers[layer].shape[-1]
         self.num_latent = num_latent
-        self.scale_factor = scale_factor if scale_factor is not None else 2e2 / (num_var * num_labels * num_latent)
+        self.scale_factor = scale_factor if scale_factor is not None else 2e2 / (self.num_var * num_labels * num_latent)
         self.level_sizes = level_sizes
         self.num_labels = np.sum(self.level_sizes)
         self.level_indices = np.cumsum([0] + self.level_sizes)
@@ -83,6 +255,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.epsilon = 0.006
         self.approx = False
         self.prior_scale = prior_scale
+        self.use_psi=use_psi
+        self.theta_prior=theta_prior
         
         self.dcd_prior=torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
         
@@ -104,7 +278,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate])
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],[self.discov_plate,self.latent_plate2,self.var_plate])
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],[self.latent_plate2,self.var_plate],init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=False)
-        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
+        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=True)
         self.zs=MAPLaplaceModule(self,'scales',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],init_val=0.01*torch.ones(self.num_labels,self.num_latent),constraint=constraints.positive,param_only=False)
         self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         
@@ -130,8 +304,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         
         super().__init__()
         # Setup the various neural networks used in the model and guide
-        self.z_decoder=ZDecoder(num_latent=self.num_latent, num_var=num_var, hidden_dims=[])        
-        self.zl_encoder=ZLEncoder(num_var=num_var,hidden_dims=encoder_hidden,num_cat_input=self.num_discov,
+        self.z_decoder=ZDecoder(num_latent=self.num_latent, num_var=self.num_var, hidden_dims=[])        
+        self.zl_encoder=ZLEncoder(num_var=self.num_var,hidden_dims=encoder_hidden,num_cat_input=self.num_discov,
                     outputs=[(self.num_latent,None),(self.num_latent,softplus)])
         
         self.classifier=Classifier(num_latent=self.num_latent,hidden_dims=classifier_hidden,
@@ -195,7 +369,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         # This helps with numerical stability during optimization.
         with poutine.scale(scale=self.scale_factor):
             # This gene-level parameter modulates the variance of the observation distribution
-            s_theta = pyro.param("s_inverse_dispersion", 50.0 * s.new_ones(self.num_var),
+            s_theta = pyro.param("s_inverse_dispersion", self.theta_prior * s.new_ones(self.num_var),
                                constraint=constraints.positive)
             
             dcd=pyro.param("discov_constitutive_de", self.dcd_prior.to(s.device))
@@ -222,21 +396,21 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                     taxon_probs=self.tree_convergence_bottom_up.just_propagate(taxon_probs,level_edges,s,cur_strictness)
                     taxon_probs=torch.cat(taxon_probs,-1)
                    
-            locs=self.zl.model_sample(s)
-            scales=self.zs.model_sample(s)
-            locs_dynam=self.zld.model_sample(s)
+            locs=self.zl.model_sample(s,scale=fest([taxon_probs],-1))
+            scales=self.zs.model_sample(s,scale=fest([taxon_probs],-1))
+            locs_dynam=self.zld.model_sample(s,scale=fest([taxon_probs],-1))
             discov_dm=self.dm.model_sample(s,scale=fest([discov,taxon_probs],-1))
             discov_di=self.di.model_sample(s,scale=fest([discov,taxon_probs],-1))
             batch_dm=self.bm.model_sample(s,scale=fest([batch,taxon_probs],-1))
             batch_embed=torch.sigmoid(self.be_nn(batch))
             bei=self.bei.model_sample(s,scale=fest([batch_embed,taxon_probs[...,:self.num_bi_depth]],-1))
             cluster_intercept=self.ci.model_sample(s,scale=fest([taxon_probs],-1))
-            z_decoder_weight=self.zdw.model_sample(s)
             
             with minibatch_plate:
                 bi=torch.einsum('...bi,...ijk->...bjk',batch_embed,bei)
                 bi=torch.einsum('...bj,...bjk->...bk',taxon[...,:self.num_bi_depth],bi)
-                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],1),self.prior_scale*s.new_ones(s.shape[0],1)).to_event(1)))#Used to be normal#maybe should be centered sigmoid
+                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],1),self.prior_scale*s.new_ones(s.shape[0],1)).to_event(1)))
+                psi = 0 if not self.use_psi else psi
                 this_locs=oh_index(locs,taxon)
                 this_scales=oh_index(scales,taxon)
                 z=pyro.sample('z', dist.Normal(this_locs,this_scales+self.epsilon,validate_args=True).to_event(1))
@@ -249,6 +423,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             z=self.z_transform(z)                
             fake_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs)*psi)
             fake_z=self.z_transform(fake_z)
+            z_decoder_weight=self.zdw.model_sample(s,scale=fest([fake_z.abs()],-1))
             discov_dc=self.dc.model_sample(s,scale=fest([discov,fake_z.abs()],-1))
             cur_discov_di = oh_index1(discov_di, discov_ind) if self.design_matrix else discov_di[discov_ind]
             cur_discov_dc = oh_index1(discov_dc, discov_ind) if self.design_matrix else discov_dc[discov_ind]
@@ -282,9 +457,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         cur_strictness=self.decay_function(step, self.max_strictness)
         
         with poutine.scale(scale=self.scale_factor):
-            locs=self.zl.guide_sample(s)
-            scales=self.zs.guide_sample(s)
-            locs_dynam=self.zld.guide_sample(s)
             level_edges=self.tree_edges.guide_sample(s,approx=self.approx) 
             with minibatch_plate:
                 z_loc, z_scale= self.zl_encoder(s,discov)
@@ -292,6 +464,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                 z=self.z_transform(z)
                 taxon_logits,psi_loc,psi_scale=self.classifier(z)
                 psi=centered_sigmoid(pyro.sample('psi',dist.Normal(psi_loc,psi_scale).to_event(1)))
+                psi = 0 if not self.use_psi else psi
                 if self.approx:
                     taxon_dist = dist.Delta(safe_sigmoid(taxon_logits),validate_args=True).to_event(1)
                     taxon_probs = pyro.sample("taxon_probs", taxon_dist)
@@ -309,8 +482,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
 
                     taxon_probs=self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s,cur_strictness)
                     taxon_probs=torch.cat(taxon_probs,-1)
-                
-            z_decoder_weight=self.zdw.guide_sample(s)
+                    
+            locs=self.zl.guide_sample(s,scale=fest([taxon_probs],-1))
+            scales=self.zs.guide_sample(s,scale=fest([taxon_probs],-1))
+            locs_dynam=self.zld.guide_sample(s,scale=fest([taxon_probs],-1))
             discov_dm=self.dm.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon_probs],-1))
             batch_embed=torch.sigmoid(self.be_nn(batch))
@@ -324,162 +499,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             z=self.z_transform(z)
             fake_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs)*psi)
             fake_z=self.z_transform(fake_z)
+            z_decoder_weight=self.zdw.guide_sample(s,scale=fest([fake_z.abs()],-1))
             discov_dc=self.dc.guide_sample(s,scale=fest([discov,fake_z.abs()],-1))
-
-class AntipodeTrainingMixin:
-    '''
-    Mixin class providing functions to actually run ANTIPODE
-    can use supervised taxonomy by training only phase2
-    '''
-    
-    def save_params_to_uns(self,prefix=''):
-        pstore=param_store_to_numpy()
-        pstore={n:pstore[n] for n in pstore.keys() if not re.search('encoder|classifier',n)}
-        self.adata_manager.adata.uns[prefix+'param_store']=pstore
-
-    def store_outputs(self,device='cuda',prefix=''):
-        self.save_params_to_uns(prefix='')
-        self.to('cpu')
-        self.eval()
-        antipode_outs=get_antipode_outputs(self,batch_size=2048,device=device)
-        taxon=antipode_outs[1][0]
-        adata.obsm['X_antipode']=antipode_outs[0][0]
-        level_edges=[numpy_hardmax(self.adata_manager.adata.uns['param_store']['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
-        levels=self.tree_convergence_bottom_up.just_propagate(scipy.special.softmax(taxon[...,-self.level_sizes[-1]:],axis=-1),level_edges,s=torch.ones(1))
-        prop_taxon=np.concatenate(levels,axis=-1)
-        adata.obsm['taxon_probs']=prop_taxon
-        levels=self.tree_convergence_bottom_up.just_propagate(numpy_hardmax(levels[-1],axis=-1),level_edges,s=torch.ones(1))
-        for i in range(len(levels)):
-            cur_clust=prefix+'level_'+str(i)
-            self.adata_manager.adata.obs[cur_clust]=levels[i].argmax(1)
-            self.adata_manager.adata.obs[cur_clust]=adata.obs[cur_clust].astype(str)
-        self.adata_manager.adata.obs[prefix+'antipode_cluster'] = self.adata_manager.adata.obs.apply(lambda x: '_'.join([x[prefix+'level_'+str(i)] for i in range(len(levels))]), axis=1)
-    
-    def train_phase_1(self,max_steps,print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=3,one_cycle_lr=True,steps=0,batch_size=32):
-        #particle phase
-        steps=steps
-        print(self.fields)
-        print(self.field_types)
-        dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=32,drop_last=True,shuffle=True,data_and_attributes=self.field_types)#supervised_field_types for supervised step
-        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
-        elbo = pyro.infer.JitTrace_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
-        svi = SVI(self.model, self.guide, scheduler, elbo)
-        self.train()
-        self.zl_encoder.train()
-        
-        self=self.to(device)
-        self.set_approx(True)
-        loss_tracker=[]
-        pbar = tqdm.tqdm(total=max_steps, position=0)
-        done=False
-        while steps < max_steps:
-            for x in dataloader:
-                x['step']=torch.ones(1).to(device)*steps
-                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
-                loss=svi.step(*x)
-                steps+=1
-                if steps<max_steps-1:
-                    scheduler.step()
-                else:
-                    break
-                pbar.update(1)
-                loss_tracker.append(loss)
-                if steps%print_every == 0:
-                    # Tell the scheduler we've done one epoch.
-                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
-        
-        pbar.close()
-        allDone()
-        print("Finished training!")
-
-    def prepare_phase_2(self):
-        '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), runs kmeans, resets tree edges and locs'''
-        kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.level_sizes[-1],init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm['X_antipode'])
-        adata.obs['kmeans']=kmeans.labels_
-        adata.obs['kmeans']=adata.obs['kmeans'].astype(str).astype('category')
-        adata.obsm['kmeans_onehot']=numpy_onehot(adata.obs['kmeans'].cat.codes,num_classes=self.level_sizes[-1]) #yoh=yoh+1e-10;yoh=oh/oh.sum(-1).reshape(-1,1)#for relaxed
-        new_locs=torch.concatenate(
-            [pyro.param('locs').new_zeros(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1]),
-             torch.tensor(kmeans.cluster_centers_,device=pyro.param('locs').device)],
-             axis=0)
-        pyro.get_param_store().__setitem__('locs',new_locs)
-        pyro.get_param_store().__setitem__('locs_dynam',new_locs.new_zeros(new_locs.shape))
-        for n in pyro.get_param_store():
-            if 'edge' in n:
-                pyro.get_param_store().__setitem__(n,pyro.param(n).new_zeros(pyro.param(n).shape))
-        
-    def train_phase_2(self,max_steps,taxon_label='kmeans_onehot',print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=1,one_cycle_lr=False,steps=0,batch_size=32):
-        '''empirically works best and fastest with one_cycle_lr=False'''
-        steps=steps
-        supervised_field_types=self.field_types.copy()
-        supervised_fields=self.fields.copy()
-        supervised_field_types["taxon"]=np.float32
-        self.adata_manager.register_new_fields([make_field('taxon',('obsm',taxon_label))])
-        class_dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=batch_size,drop_last=True,shuffle=True,data_and_attributes=supervised_field_types)
-        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
-        elbo = pyro.infer.JitTrace_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
-        svi = SVI(self.model, self.guide, scheduler, elbo)
-        
-        self.train()
-        self=self.to(device)
-        self.set_approx(False)
-        loss_tracker=[]
-        #for steps in range(max_steps):
-        pbar = tqdm.tqdm(total=max_steps, position=0)
-        done=False
-        while steps < max_steps:
-            for x in class_dataloader:
-                x['step']=torch.ones(1).to(device)*steps
-                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
-                loss=svi.step(*x)
-                steps+=1
-                if steps<=max_steps-1:
-                    #scheduler.step()
-                    pass
-                else:
-                    break
-                pbar.update(1)
-                loss_tracker.append(loss)
-                if steps%print_every == 0:
-                    # Tell the scheduler we've done one epoch.
-                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
-        
-        pbar.close()
-        allDone()
-        print("Finished training!")
-
-    def train_phase_3(self,max_steps,print_every=10000,device='cuda',max_learning_rate=0.001,num_particles=3,one_cycle_lr=True,steps=0,batch_size=32):
-        steps=steps
-        dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=batch_size,drop_last=True,shuffle=True,data_and_attributes=self.field_types)#supervised_field_types for supervised step
-        scheduler=pyro.optim.OneCycleLR({'max_lr':max_learning_rate,'total_steps':max_steps,'div_factor':100,'optim_args':{},'optimizer':torch.optim.Adam}) if one_cycle_lr else pyro.optim.ClippedAdam({'lr':max_learning_rate,'lrd':(1-(5e-6))})
-        elbo = pyro.infer.JitTraceEnum_ELBO(num_particles=num_particles,strict_enumeration_warning=False)
-        svi = SVI(self.model, self.guide, scheduler, elbo)
-
-        loss_tracker=[]
-        self.train()
-        self=self.to(device)
-        self.set_approx(False)
-        
-        #for steps in range(max_steps):
-        pbar = tqdm.tqdm(total=max_steps, position=0)
-        done=False
-        while steps < max_steps:
-            for x in dataloader:
-                x['step']=torch.ones(1).to(device)*steps
-                x=[x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
-                loss=svi.step(*x)
-                steps+=1
-                if steps<max_steps-1:
-                    #scheduler.step()
-                    pass
-                else:
-                    break
-                pbar.update(1)
-                loss_tracker.append(loss)
-                if steps%print_every == 0:
-                    # Tell the scheduler we've done one epoch.
-                    pbar.write("[Step %02d]  Loss: %.5f" % (steps, np.mean(loss_tracker[-print_every:])))
-        
-        pbar.close()
-        allDone()
-        print("Finished training!")
+            
