@@ -225,9 +225,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     encoder_hidden (list of int, optional): Sizes of hidden layers for the encoder network. Defaults to [6000, 5000, 3000, 1000].
     '''
     def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1, 10, 25, 50], 
-                 num_latent=50, scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,
-                 decay_function=None, max_strictness=1., bi_depth=2, num_batch_embed=10,theta_prior=50.0,
-                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000]):
+                 num_latent=50, scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,loc_as_param=False,zdw_as_param=False,
+                 decay_function=None, max_strictness=1., bi_depth=2, num_batch_embed=10,theta_prior=50.,scale_init_val=0.01,
+                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],phase1_treeest=False,z_transform=None):
 
         pyro.clear_param_store()
 
@@ -250,13 +250,17 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.num_bi_depth = sum(self.level_sizes[:self.bi_depth])
         self.num_batch_embed = num_batch_embed
         self.max_strictness = 1.
-        self.decay_function = gen_linear_function(max_steps,10000) if decay_function is None else decay_function 
+        self.decay_function = gen_linear_function(2,1) if decay_function is None else decay_function 
         self.temperature = 0.1
         self.epsilon = 0.006
         self.approx = False
         self.prior_scale = prior_scale
         self.use_psi=use_psi
+        self.loc_as_param=loc_as_param
+        self.zdw_as_param=zdw_as_param
         self.theta_prior=theta_prior
+        self.phase1_treeest=phase1_treeest
+        self.scale_init_val=scale_init_val
         
         self.dcd_prior=torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
         
@@ -277,15 +281,15 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.bei=MAPLaplaceModule(self,'batch_di',[self.num_batch_embed,self.num_bi_depth,self.num_var],[self.batch_embed_plate,self.bi_depth_plate,self.var_plate])
         self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate])
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],[self.discov_plate,self.latent_plate2,self.var_plate])
-        self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],[self.latent_plate2,self.var_plate],init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=False)
-        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
-        self.zs=MAPLaplaceModule(self,'scales',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],init_val=0.01*torch.ones(self.num_labels,self.num_latent),constraint=constraints.positive,param_only=False)
+        self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],[self.latent_plate2,self.var_plate],init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=self.zdw_as_param)
+        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=self.loc_as_param)
+        self.zs=MAPLaplaceModule(self,'scales',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],init_val=self.scale_init_val*torch.ones(self.num_labels,self.num_latent),constraint=constraints.positive,param_only=False)
         self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         
         self.tree_edges=TreeEdges(self,straight_through=True)
         self.tree_convergence=TreeConvergence(self,strictness=1.)        
         self.tree_convergence_bottom_up=TreeConvergenceBottomUp(self,strictness=1.)        
-        self.z_transform=null_function#centered_sigmoid#torch.special.expit
+        self.z_transform=null_function if z_transform is None else z_transform#centered_sigmoid#torch.special.expit
 
         if self.design_matrix:
             fields={'s':('layers',self.layer),
@@ -381,7 +385,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                 if self.approx:#Bernoulli particles approx?
                     taxon_probs = pyro.sample("taxon_probs", dist.Beta(beta_prior_a,s.new_ones(self.num_labels),validate_args=True).to_event(1))
                     taxon = pyro.sample('taxon',dist.RelaxedBernoulli(temperature=0.1*s.new_ones(1),probs=taxon_probs).to_event(1))
-                    #self.tree_convergence.model_sample(taxon,level_edges,s,cur_strictness)#Someday will be possible to properly generate Undirected acyclic graphs here
+                    if self.phase1_treeest:
+                        self.tree_convergence.model_sample(taxon,level_edges,s,cur_strictness)#Someday will be possible to properly generate Undirected acyclic graphs here
                 else:
                     taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(s.shape[0],self.level_sizes[-1]),validate_args=True))
                     if sum(taxon.shape) > 1:#Supervised?
@@ -402,7 +407,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             discov_dm=self.dm.model_sample(s,scale=fest([discov,taxon_probs],-1))
             discov_di=self.di.model_sample(s,scale=fest([discov,taxon_probs],-1))
             batch_dm=self.bm.model_sample(s,scale=fest([batch,taxon_probs],-1))
-            batch_embed=torch.sigmoid(self.be_nn(batch))
+            batch_embed=centered_sigmoid(self.be_nn(batch))
             bei=self.bei.model_sample(s,scale=fest([batch_embed,taxon_probs[...,:self.num_bi_depth]],-1))
             cluster_intercept=self.ci.model_sample(s,scale=fest([taxon_probs],-1))
             
@@ -469,7 +474,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                     taxon_dist = dist.Delta(safe_sigmoid(taxon_logits),validate_args=True).to_event(1)
                     taxon_probs = pyro.sample("taxon_probs", taxon_dist)
                     taxon = pyro.sample('taxon',dist.RelaxedBernoulli(temperature=self.temperature*s.new_ones(1),probs=taxon_probs).to_event(1))
-                    #self.tree_convergence.guide_sample(taxon,level_edges,s,cur_strictness)
+                    if self.phase1_treeest:
+                        self.tree_convergence.guide_sample(taxon,level_edges,s,cur_strictness)
                 else:
                     taxon_probs=pyro.sample('taxon_probs',dist.Delta(safe_softmax(taxon_logits[...,-self.level_sizes[-1]:])).to_event(1))
                     if sum(taxon.shape) > 1:
@@ -487,7 +493,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             locs_dynam=self.zld.guide_sample(s,scale=fest([taxon_probs],-1))
             discov_dm=self.dm.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon_probs],-1))
-            batch_embed=torch.sigmoid(self.be_nn(batch))
+            batch_embed=centered_sigmoid(self.be_nn(batch))
             discov_di=self.di.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon_probs],-1))
             bei=self.bei.guide_sample(s,scale=fest([batch_embed,taxon_probs[...,:self.num_bi_depth]],-1))#maybe should be abs sum bei

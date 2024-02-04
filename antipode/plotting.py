@@ -60,7 +60,7 @@ def plot_gmm_heatmaps(antipode_model):
     plt.title('inverse_dispersion')
     plt.show()
 
-def group_aggr_anndata(ad, category_column_names, agg_func=np.mean):
+def group_aggr_anndata(ad,category_column_names, agg_func=np.mean,layer=None,obsm=False):
     """
     Calculate the aggregated value (default is mean) for each column for each group in an AnnData object,
     returning a numpy array of size [cat_size0, cat_size1, ..., num_variables].
@@ -71,7 +71,7 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean):
     :return: Numpy array of calculated aggregates
     """
 
-    num_columns = ad.shape[1]
+    num_columns = ad.shape[1] if not obsm else ad.obsm[layer].shape[-1]
     category_sizes = []
     category_indices = {}
 
@@ -95,7 +95,10 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean):
             indices = np.where(categories == cat)[0]
 
             if indices.size > 0:
-                rows = ad[indices, :].X
+                if obsm:
+                    rows = ad[indices, :].obsm[layer]
+                else:
+                    rows = ad[indices, :].layer[layer] if layer is not None else ad[indices, :].X
 
                 # Convert sparse matrix to dense if necessary
                 if isinstance(rows, np.ndarray):
