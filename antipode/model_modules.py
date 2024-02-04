@@ -73,13 +73,17 @@ class MAPLaplaceModule(MMB):
 
 
 class MAPHalfCauchyModule(MMB):
+    '''
+    MAP module for a maximum a posteriori estimate given a half cauchy prior. 
+    Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right)
+    '''
     def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False):
         super().__init__(model)
         self.param_name=name
         self.param_shape=param_shape
         self.plate_list=plate_list
         self.dependent_dim=sum([isinstance(x,contextlib.nullcontext) for x in self.plate_list])
-        self.constraint=constraint if constraint is not None else constraints.positive
+        self.constraint=constraint if constraint is not None else constraints.real
         self.init_val=init_val
         self.param_only=param_only
     
@@ -87,20 +91,22 @@ class MAPHalfCauchyModule(MMB):
         if self.param_only:
             return self.make_params(s)
         with existing_plate_stack(scale+self.plate_list):
-            return pyro.sample(self.param_name+'_sample',dist.HalfCauchy(s.new_ones(self.param_shape)).to_event(self.dependent_dim))
+            return pyro.sample(self.param_name+'_sample',dist.HalfCauchy(
+                            s.new_ones(self.param_shape)).to_event(self.dependent_dim))
     
     def make_params(self,s=torch.ones(1)):
         if self.init_val is not None:
             return pyro.param(self.param_name,self.init_val.to(s.device),constraint=self.constraint)
         else:
-            return pyro.param(self.param_name,0.05*torch.ones(self.param_shape,device=s.device),constraint=self.constraint)#1e-5*torch.randn
+            return pyro.param(self.param_name,1e-5*torch.randn(self.param_shape,device=s.device),constraint=self.constraint)#1e-5*torch.randn
 
     def guide_sample(self,s=torch.ones(1),scale=[]):
         p=self.make_params(s)
         if self.param_only:
             return p
         with existing_plate_stack(scale+self.plate_list):
-            return pyro.sample(self.param_name+'_sample',dist.Delta(p))
+            return pyro.sample(self.param_name+'_sample',dist.Delta(p).to_event(self.dependent_dim))
+
 
 
 class TreeEdges(MMB):
