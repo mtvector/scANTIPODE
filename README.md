@@ -12,4 +12,5 @@
 - Tutorials
 - Package for distribution
 - MCMC Param Variances
+- Dataset-level composition expectation
 - Dynamic GMM before phase 2
