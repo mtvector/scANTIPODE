@@ -163,9 +163,7 @@ class DMCorrectOutput(nn.Module):
                               pyro.param('species_dm')[species_values.argmax(1),...])))          
     
 class SimpleFFNN(nn.Module):
-    '''
-    Basic feed forward neural network
-    '''
+    '''Basic feed forward neural network'''
     def __init__(self, in_dim, hidden_dims, out_dim):
         super().__init__()
         dims = [in_dim] + hidden_dims + [out_dim]
@@ -178,9 +176,7 @@ def mixture(x,y,psi):
     return((psi*x)+((1-psi)*y))
 
 class TGeN(nn.Module):
-    '''
-    Trajectory Generator Network
-    '''
+    '''Trajectory Generator Network'''
     def __init__(self, in_dim, hidden_dim):
         super().__init__()
         self.linear1=nn.Linear(in_dim, hidden_dim,bias=True)
@@ -200,19 +196,17 @@ class TGeN(nn.Module):
         return x
 
 def softplus_sum(z):
-    '''
-    Transforms to simplex in linear space rather than softplus' exponential
-    '''
+    '''Transforms to simplex in linear space rather than softplus' exponential'''
     z=torch.nn.functional.relu(z)
     z=z+1e-8
     z=z/z.sum(-1).reshape(-1,1)
     return(z)
 
-def exp_sum(a,b):
-    '''
-    Add two exponentials (in linear space)
-    '''
-    return((a.exp()+b.exp()).log())
+def beta_parameters_from_mean_variance(mu, sigma_squared):
+    '''Calculate beta distribution parameters given mu and sigma^2'''
+    a = mu * (mu * (1 - mu) - sigma_squared) / sigma_squared
+    b = a * (1 / mu - 1)
+    return a, b
 
 def index_to_onehot(index, out_shape):
     if sum(index.shape) == 1:

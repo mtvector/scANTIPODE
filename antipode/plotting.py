@@ -7,6 +7,47 @@ import matplotlib.pyplot as plt
 import model_functions
 import tqdm
 
+
+def plot_loss(loss_tracker):
+    '''Plots vector of values along with moving average'''
+    seaborn.scatterplot(x=list(range(len(loss_tracker))),y=loss_tracker,alpha=0.5,s=2)
+    def moving_average(x, w):
+        return np.convolve(x, np.ones(w), 'valid') / w
+    w=300
+    mvavg=moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
+    seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,color='coral')
+    plt.show()
+
+def clip_latent_dimensions(matrix, x):
+    """
+    Clips each latent dimension of the matrix at the 0+x and 100-x percentile.
+
+    Parameters:
+    - matrix: A 2D NumPy array of shape [number of observations, latent dimensions].
+    - x: The percentage for the lower and upper bounds (0 < x < 50).
+
+    Returns:
+    - A 2D NumPy array with the same shape as the input matrix, with values clipped.
+    """
+    # Ensure x is within the valid range
+    if x < 0 or x > 50:
+        raise ValueError("x must be between 0 and 50")
+
+    # Initialize a clipped matrix with the same shape as the input matrix
+    clipped_matrix = np.zeros_like(matrix)
+
+    # Iterate over each column (latent dimension) to apply clipping
+    for col_idx in range(matrix.shape[1]):
+        # Calculate the percentiles for the current column
+        lower_percentile = np.percentile(matrix[:, col_idx], x)
+        upper_percentile = np.percentile(matrix[:, col_idx], 100-x)
+        
+        # Clip the values in the current column based on the calculated percentiles
+        clipped_matrix[:, col_idx] = np.clip(matrix[:, col_idx], lower_percentile, upper_percentile)
+
+    return clipped_matrix
+
+
 def plot_d_hists(antipode_model):
     categories=antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['categorical_mapping']
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
