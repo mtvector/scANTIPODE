@@ -56,7 +56,7 @@ class MAPLaplaceModule(MMB):
             return self.make_params(s)
         with existing_plate_stack(scale+self.plate_list):
             return pyro.sample(self.param_name+'_sample',dist.Laplace(s.new_zeros(self.param_shape),
-                            self.model.prior_scale*s.new_ones(self.param_shape)).to_event(self.dependent_dim))
+                            self.model.prior_scale*s.new_ones(self.param_shape),validate_args=True).to_event(self.dependent_dim))
     
     def make_params(self,s=torch.ones(1)):
         if self.init_val is not None:
@@ -69,7 +69,7 @@ class MAPLaplaceModule(MMB):
         if self.param_only:
             return p
         with existing_plate_stack(scale+self.plate_list):
-            return pyro.sample(self.param_name+'_sample',dist.Delta(p).to_event(self.dependent_dim))
+            return pyro.sample(self.param_name+'_sample',dist.Delta(p,validate_args=True).to_event(self.dependent_dim))
 
 
 class MAPHalfCauchyModule(MMB):
