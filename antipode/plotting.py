@@ -101,57 +101,91 @@ def plot_gmm_heatmaps(antipode_model):
     plt.title('inverse_dispersion')
     plt.show()
 
-def group_aggr_anndata(ad,category_column_names, agg_func=np.mean,layer=None,obsm=False):
+def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False):
     """
-    Calculate the aggregated value (default is mean) for each column for each group in an AnnData object,
-    returning a numpy array of size [cat_size0, cat_size1, ..., num_variables].
-
+    Calculate the aggregated value (default is mean) for each column for each group combination in an AnnData object,
+    returning a numpy array of the shape [cat_size0, cat_size1, ..., num_variables] and a dictionary of category orders.
+    
     :param ad: AnnData object
     :param category_column_names: List of column names in ad.obs pointing to categorical variables
     :param agg_func: Aggregation function to apply (e.g., np.mean, np.std). Default is np.mean.
-    :return: Numpy array of calculated aggregates
+    :param layer: Specify if a particular layer of the AnnData object is to be used.
+    :param obsm: Boolean indicating whether to use data from .obsm attribute.
+    :return: Numpy array of calculated aggregates and a dictionary with category orders.
     """
+    if not category_column_names:
+        raise ValueError("category_column_names must not be empty")
+    
+    # Ensure category_column_names are in a list if only one was provided
+    if isinstance(category_column_names, str):
+        category_column_names = [category_column_names]
 
-    num_columns = ad.shape[1] if not obsm else ad.obsm[layer].shape[-1]
-    category_sizes = []
-    category_indices = {}
+    # Initialize dictionary for category orders
+    category_orders = {}
 
     # Determine the size for each categorical variable and prepare indices
     for cat_name in category_column_names:
-        categories = ad.obs[cat_name]
-        unique_cats = categories.cat.categories
-        category_sizes.append(len(unique_cats))
-        category_indices[cat_name] = {cat: idx for idx, cat in enumerate(unique_cats)}
+        categories = ad.obs[cat_name].astype('category')
+        category_orders[cat_name] = categories.cat.categories.tolist()
 
-    # Initialize the result array
-    result_shape = category_sizes + [num_columns]
+    # Calculate the product of category sizes to determine the shape of the result array
+    category_sizes = [len(category_orders[cat]) for cat in category_column_names]
+    num_variables = ad.shape[1] if not obsm else ad.obsm[layer].shape[-1]
+    result_shape = category_sizes + [num_variables]
     result = np.zeros(result_shape, dtype=np.float64)
 
-    # Calculate aggregates for each category and fill in the result array
-    for cat_name in category_column_names:
-        categories = ad.obs[cat_name]
-        cat_idx = category_column_names.index(cat_name)
+    # Iterate over all combinations of category values
+    for indices, combination in enumerate(tqdm.tqdm(np.ndindex(*category_sizes), total=np.prod(category_sizes))):
+        # Convert indices to category values
+        category_values = [category_orders[cat][index] for cat, index in zip(category_column_names, combination)]
+        
+        # Create a mask for rows matching the current combination of category values
+        mask = np.ones(len(ad), dtype=bool)
+        for cat_name, cat_value in zip(category_column_names, category_values):
+            mask &= ad.obs[cat_name].values == cat_value
+        
+        selected_indices = np.where(mask)[0]
+        
+        if selected_indices.size > 0:
+            if obsm:
+                data = ad.obsm[layer][selected_indices]
+            else:
+                data = ad[selected_indices].X if layer is None else ad[selected_indices].layers[layer]
 
-        for cat, idx in tqdm.tqdm(category_indices[cat_name].items()):
-            indices = np.where(categories == cat)[0]
+            # Convert sparse matrix to dense if necessary
+            if isinstance(data, np.ndarray):
+                dense_data = data
+            else:
+                dense_data = data.toarray()
+            
+            # Apply the aggregation function and assign to the result
+            result[combination] = agg_func(dense_data, axis=0)
 
-            if indices.size > 0:
-                if obsm:
-                    rows = ad[indices, :].obsm[layer]
-                else:
-                    rows = ad[indices, :].layer[layer] if layer is not None else ad[indices, :].X
+    
+    return result, category_orders
+    
 
-                # Convert sparse matrix to dense if necessary
-                if isinstance(rows, np.ndarray):
-                    dense_rows = rows
-                else:
-                    dense_rows = rows.toarray()
-
-                slice_obj = [slice(None)] * len(result_shape)
-                slice_obj[cat_idx] = idx
-                result[tuple(slice_obj)] = agg_func(dense_rows, axis=0)
-
-    return result, category_indices
+def match_categorical_order(source, target):
+    """
+    Generate indices to sort the 'source' array to match the order of the 'target' array.
+    
+    Parameters:
+    - source: An iterable of categorical values.
+    - target: An iterable of categorical values with a desired ordering.
+    
+    Returns:
+    - An array of indices that will sort 'source' to match the order of 'target'.
+    """
+    # Create a mapping from target values to their indices
+    order_mapping = {val: i for i, val in enumerate(target)}
+    
+    # Generate a list of indices in 'source' sorted by the order defined in 'target'
+    sorted_indices = sorted(range(len(source)), key=lambda x: order_mapping.get(source[x], -1))
+    
+    # If there are values in 'source' not found in 'target', they are placed at the end by default.
+    # You can customize the behavior as needed.
+    
+    return np.array(sorted_indices)
 
 
 def ndarray_top_n_indices(arr, n, axis,descending=True):
