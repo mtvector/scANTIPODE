@@ -26,9 +26,12 @@ def safe_sigmoid(x,eps=1e-10):
 def centered_sigmoid(x):
     return (2*(torch.sigmoid(x)-0.5))
 
-def safe_softmax(x,dim=-1):
+def numpy_centered_sigmoid(x):
+    return((scipy.special.expit(x)-0.5)*2)
+
+def safe_softmax(x,dim=-1,eps=1e-10):
     x=torch.softmax(x,dim)
-    x=x+1e-10
+    x=x+eps
     return (x/x.sum(dim,keepdim=True))
 
 def minmax(x):

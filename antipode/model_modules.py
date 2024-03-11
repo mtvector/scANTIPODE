@@ -240,3 +240,111 @@ class TreeConvergenceBottomUp(MMB):
             results.append(numpy_hardmax(result))
         results=results[::-1]
         return(results)
+
+    def dummy_propagate(self,y1,level_edges,s=torch.ones(1),strictness=None):
+        results=[y1]
+        for i in range(len(self.model.level_sizes) - 1):
+            cle=level_edges[-(i+1)]
+            result=results[i]@(cle.new_zeros(cle.shape)+1e-10)
+            results.append(result)
+        results=results[::-1]
+        return(results)
+
+import torch
+import pyro
+from pyro.infer import TracePosterior, ELBO
+from pyro import poutine
+import warnings
+import numpy as np
+
+def torch_item(x):
+    """A helper function to extract the item from a tensor."""
+    return x.item() if isinstance(x, torch.Tensor) else x
+
+class SafeSVI(TracePosterior):
+    '''A version of pyro.infer.SVI that skips steps with loss more than X sigma from the running mean loss'''
+    def __init__(
+        self,
+        model,
+        guide,
+        optim,
+        loss,
+        loss_and_grads=None,
+        clip_std_multiplier=6.0,
+        window_size=1000,  # Default window size of 300
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.model = model
+        self.guide = guide
+        self.optim = optim
+        self.clip_std_multiplier = clip_std_multiplier
+        self.window_size = window_size
+        self.losses = []  # Store recent losses to calculate running stats
+
+        if not isinstance(optim, pyro.optim.PyroOptim):
+            raise ValueError("Optimizer should be an instance of pyro.optim.PyroOptim class.")
+
+        if isinstance(loss, ELBO):
+            self.loss = loss.loss
+            self.loss_and_grads = loss.loss_and_grads
+        else:
+            if loss_and_grads is None:
+                def _loss_and_grads(*args, **kwargs):
+                    loss_val = loss(*args, **kwargs)
+                    if getattr(loss_val, "requires_grad", False):
+                        loss_val.backward(retain_graph=True)
+                    return loss_val
+                self.loss_and_grads = _loss_and_grads
+            else:
+                self.loss_and_grads = loss_and_grads
+
+    def _traces(self, *args, **kwargs):
+        for i in range(self.num_samples):
+            guide_trace = poutine.trace(self.guide).get_trace(*args, **kwargs)
+            model_trace = poutine.trace(
+                poutine.replay(self.model, trace=guide_trace)
+            ).get_trace(*args, **kwargs)
+            yield model_trace, 1.0
+
+    def evaluate_loss(self, *args, **kwargs):
+        with torch.no_grad():
+            loss = self.loss(self.model, self.guide, *args, **kwargs)
+            return torch_item(loss)
+
+    def step(self, *args, **kwargs):
+        # Compute loss and gradients
+        with poutine.trace(param_only=True) as param_capture:
+            loss = self.loss_and_grads(self.model, self.guide, *args, **kwargs)
+    
+        loss_val = torch_item(loss)
+        self.losses.append(loss_val)
+        # Keep only the last `window_size` losses
+        if len(self.losses) > self.window_size:
+            self.losses.pop(0)
+        # Extract params early to ensure they are defined for later use
+        params = set(site["value"].unconstrained() for site in param_capture.trace.nodes.values())
+        
+        # Calculate running mean and std only if we have enough data
+        if len(self.losses) >= self.window_size:
+            running_mean = np.mean(self.losses)
+            running_std = np.std(self.losses)
+            #print(loss, running_mean,running_std)
+            if ((loss > running_mean-running_std*self.clip_std_multiplier) and (loss < running_mean+running_std*self.clip_std_multiplier)):
+                # Perform optimization step
+                self.optim(params)
+            else:
+                print('STEP SKIPPED')
+                #print(self.losses)
+                #print(loss, running_mean,running_std*self.clip_std_multiplier)
+                #seaborn.lineplot(self.losses)
+                #plt.show()
+                #seaborn.histplot(self.losses)
+                #plt.show()
+        else:
+            self.optim(params)
+            
+        # Zero gradients
+        pyro.infer.util.zero_grads(params)
+    
+        return loss_val
