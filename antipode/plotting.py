@@ -1,21 +1,40 @@
 import seaborn
 import numpy as np
+import pandas as pd
 import scipy
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
 import model_functions
 import tqdm
+import scanpy as sc
+import sklearn
+import model_functions
+
+def moving_average(x, w):
+    return np.convolve(x, np.ones(w), 'valid') / w
 
 
 def plot_loss(loss_tracker):
     '''Plots vector of values along with moving average'''
     seaborn.scatterplot(x=list(range(len(loss_tracker))),y=loss_tracker,alpha=0.5,s=2)
-    def moving_average(x, w):
-        return np.convolve(x, np.ones(w), 'valid') / w
     w=300
     mvavg=moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
     seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,color='coral')
+    plt.show()
+
+def plot_grad_norms(antipode_model):
+    plt.figure(figsize=(20, 5), dpi=100).set_facecolor("white")
+    ax = plt.subplot(111)
+    w=300
+    for i,(name, grad_norms) in enumerate(antipode_model.gradient_norms.items()):
+        mvavg=moving_average(np.pad(grad_norms,int(w/2),mode='edge'),w)
+        seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,label=name,color=sc.pl.palettes.godsnot_102[i%102],ax=ax,linewidth = 1.)
+    plt.xlabel("iters")
+    plt.ylabel("gradient norm")
+    plt.yscale("log")
+    ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+    plt.title("Gradient norms during SVI");
     plt.show()
 
 def clip_latent_dimensions(matrix, x):
@@ -47,6 +66,22 @@ def clip_latent_dimensions(matrix, x):
 
     return clipped_matrix
 
+def plot_batch_embedding_pca(antipode_model):
+    try:
+        pca=sklearn.decomposition.PCA(n_components=2)
+        batch_eye=torch.eye(antipode_model.num_batch)
+        batch_pca=pca.fit_transform(model_functions.centered_sigmoid(antipode_model.be_nn.cpu()(batch_eye)).detach().numpy())
+        df=pd.DataFrame(batch_pca)
+        batch_species=antipode_model.adata_manager.adata.obs.groupby(antipode_model.batch_key)['species'].value_counts().unstack().idxmax(axis=1).to_dict()
+        
+        df[antipode_model.batch_key]=antipode_model.adata_manager.adata.obs[antipode_model.batch_key].cat.categories
+        df[antipode_model.discov_key]=[batch_species[x] for x in antipode_model.adata_manager.adata.obs[antipode_model.batch_key].cat.categories]
+        seaborn.scatterplot(df,x=0,y=1,hue='species')
+        plt.xlabel('batch embedding PC1')
+        plt.ylabel('batch embedding PC2')
+        return(df)
+    except:
+        print('plot failed')
 
 def plot_d_hists(antipode_model):
     categories=antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['categorical_mapping']
