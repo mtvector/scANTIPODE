@@ -24,6 +24,7 @@ from model_modules import *
 from model_distributions import *
 from model_functions import *
 from train_utils import *
+from plotting import *
 
 class AntipodeTrainingMixin:
     '''
@@ -38,11 +39,12 @@ class AntipodeTrainingMixin:
         self.adata_manager.adata.uns[prefix+'param_store']=pstore
 
     def get_antipode_outputs(self,batch_size=2048,device='cuda'):
-        if 'species_onehot' not in self.adata_manager.adata.obsm.keys():
-            self.adata_manager.adata.obsm['species_onehot']=numpy_onehot(self.adata_manager.adata.obs['species'].cat.codes)
-        self.adata_manager.register_new_fields([scvi.data.fields.ObsmField('species_onehot','species_onehot')])
+        if 'discov_onehot' not in self.adata_manager.adata.obsm.keys():
+            self.adata_manager.adata.obs[self.discov_key]=self.adata_manager.adata.obs[self.discov_key].astype('category')
+            self.adata_manager.adata.obsm['discov_onehot']=numpy_onehot(self.adata_manager.adata.obs[self.discov_key].cat.codes)
+        self.adata_manager.register_new_fields([scvi.data.fields.ObsmField('discov_onehot','discov_onehot')])
     
-        field_types={"s":np.float32,"species_onehot":np.float32}
+        field_types={"s":np.float32,"discov_onehot":np.float32}
         dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=32,drop_last=False,shuffle=False,data_and_attributes=field_types)#supervised_field_types for supervised step 
         encoder_outs=batch_output_from_dataloader(dataloader,self.zl_encoder,batch_size=batch_size,device=device)
         encoder_outs[0]=self.z_transform(encoder_outs[0])
@@ -56,6 +58,7 @@ class AntipodeTrainingMixin:
         self.to('cpu')
         self.eval()
         antipode_outs=self.get_antipode_outputs(batch_size=2048,device=device)
+        self.allDone()
         taxon=antipode_outs[1][0]
         self.adata_manager.adata.obsm[prefix+'X_antipode']=antipode_outs[0][0]
         self.adata_manager.adata.obs[prefix+'psi']=numpy_centered_sigmoid(antipode_outs[1][1])
@@ -129,7 +132,7 @@ class AntipodeTrainingMixin:
         self.adata_manager.adata.obs[cluster].astype(int)
         new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer='X_antipode',obsm=True)[0]
         new_scales=torch.concatenate(
-            [0.0001*self.scale_init_val*new_locs.new_ones(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1],requires_grad=True),
+            [1e-5 * self.scale_init_val * new_locs.new_ones(sum(self.level_sizes[:-1]), pyro.param('locs').shape[1],requires_grad=True),
              torch.tensor(new_scales+1e-10,device=pyro.param('scales').device,requires_grad=True)],axis=0).float()
         self.adata_manager.adata.obs[cluster].astype(str)
         pyro.get_param_store().__setitem__('locs',new_locs)
@@ -197,7 +200,6 @@ class AntipodeTrainingMixin:
         elbo_class = pyro.infer.JitTrace_ELBO
         elbo = elbo_class(num_particles=num_particles, strict_enumeration_warning=False)
         hide_params=[name for name in pyro.get_param_store() if re.search('encoder',name)]
-        print(hide_params)
         guide=self.guide if not self.freeze_encoder else poutine.block(self.guide,hide=hide_params)
         svi = SafeSVI(self.model, guide, scheduler, elbo,clip_std_multiplier=5.0)  
         self.train()
@@ -208,9 +210,10 @@ class AntipodeTrainingMixin:
         
     def allDone(self):
         print("Finished training!")
+        import IPython
         from IPython.display import Audio, display
+        IPython.display.clear_output()
         display(Audio(url='https://notification-sounds.com/soundsfiles/Meditation-bell-sound.mp3', autoplay=True))
-
 
 class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     """
@@ -486,9 +489,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             with minibatch_plate:
                 batch_embed=self.be_nn(batch)
                 batch_embed=centered_sigmoid(pyro.sample('batch_embed', dist.Delta(batch_embed,validate_args=True).to_event(1)))
-                if self.freeze_encoder:#Bernoulli particles approx?
+                if self.freeze_encoder:
                     with torch.no_grad():
-                        print('nograd')
                         z_loc, z_scale , q_loc,q_scale= self.zl_encoder(s,discov)
                         z_loc=z_loc.detach()
                         z_scale=z_scale.detach()
