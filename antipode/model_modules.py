@@ -1,7 +1,7 @@
-import model_distributions
-from model_distributions import *
-import model_functions
-from model_functions import *
+from . import model_distributions
+from .model_distributions import *
+from . import model_functions
+from .model_functions import *
 import pyro
 import pyro.distributions as dist
 import torch

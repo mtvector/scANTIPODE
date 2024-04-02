@@ -2,11 +2,11 @@
 #from .model_distributions import *
 #from .model_functions import *
 #from .model_modules import *
-import scanpy as sc
-import pandas as pd
-import numpy as np
-import pyro
-import scvi
+from antipode import model_distributions
+from antipode import model_functions
+from antipode import plotting
+from antipode import model_modules
+from antipode import train_utils
 
 # You might also define some basic information or helper functions here
 __version__ = '0.1.0'

@@ -1,4 +1,5 @@
-#Derived from version PBS1.9.1.5
+#Derived from testing version PBS1.9.1.6
+import sys
 import sklearn
 from sklearn import cluster
 import pandas as pd
@@ -9,6 +10,7 @@ import inspect
 import tqdm
 import numpy as np
 import scipy
+import gc
 import torch
 import torch.nn as nn
 from torch.nn.functional import softplus, softmax
@@ -20,11 +22,11 @@ import pyro.optim
 import re
 from scvi.module.base import PyroBaseModuleClass
 
-from model_modules import *
-from model_distributions import *
-from model_functions import *
-from train_utils import *
-from plotting import *
+from .model_modules import *
+from .model_distributions import *
+from .model_functions import *
+from .train_utils import *
+from .plotting import *
 
 class AntipodeTrainingMixin:
     '''
@@ -80,7 +82,7 @@ class AntipodeTrainingMixin:
         self=self.train()
         
         model = self.classifier.to(device)
-        input_tensor =  torch.tensor(self.adata_manager.adata.obsm[prefix+'X_antipode'])  # Your input features tensor, shape [n_samples, n_features]
+        input_tensor =  torch.tensor(self.adata_manager.adata.obsm[self.dimension_reduction])  # Your input features tensor, shape [n_samples, n_features]
         target_tensor = torch.tensor(self.adata_manager.adata.obsm[cluster+'_onehot'])  # Your target labels tensor, shape [n_samples]    
         
         # Step 1: Prepare to train
@@ -108,11 +110,12 @@ class AntipodeTrainingMixin:
         s2=ideal_val*s1/o1
         self.scale_factor=s2
 
-    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device='cuda'):
+    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device='cuda',dimension_reduction='X_antipode'):
         '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), 
-        runs kmeans if cluster=kmeans, else uses the obs column provided by cluster. epochs=None skips pretraing of classifier'''
+        runs kmeans if cluster=kmeans, else uses the obs column provided by cluster. epochs=None skips pretraing of classifier
+        To learn a latent space from scratch set dimension_reduction to None and use freeze_encoder=False'''
         if cluster=='kmeans':
-            kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.level_sizes[-1],init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm['X_antipode'])
+            kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.level_sizes[-1],init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm[dimension_reduction])
             self.adata_manager.adata.obs['kmeans']=kmeans.labels_
             self.adata_manager.adata.obs['kmeans']=self.adata_manager.adata.obs['kmeans'].astype(int).astype('category')
             self.adata_manager.adata.obsm['kmeans_onehot']=numpy_onehot(self.adata_manager.adata.obs['kmeans'].cat.codes,num_classes=self.level_sizes[-1])
@@ -121,16 +124,22 @@ class AntipodeTrainingMixin:
             self.adata_manager.adata.obsm[cluster+'_onehot']=numpy_onehot(self.adata_manager.adata.obs[cluster].cat.codes,num_classes=self.level_sizes[-1])
         
         self.adata_manager.register_new_fields([make_field('taxon',('obsm',cluster+'_onehot'))])
-        if epochs is not None:
+        if dimension_reduction is not None:#For supervised Z register dr
+            self.dimension_reduction=dimension_reduction
+            self.adata_manager.register_new_fields([make_field('Z_obs',('obsm',dimension_reduction))])
+        if (epochs is not None) and (dimension_reduction is not None):
             self.pretrain_classifier(cluster=cluster,prefix=prefix,epochs=epochs,device=device)
-        kmeans_means=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.mean,layer='X_antipode',obsm=True)[0]
+        kmeans_means=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.mean,layer=dimension_reduction,obsm=True)[0]
+        if 'locs' not in [x for x in pyro.get_param_store()]:
+            print('quick init')
+            self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=32)
         new_locs=torch.concatenate(
             [pyro.param('locs').new_zeros(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1]),
              torch.tensor(kmeans_means-kmeans_means.mean(0),device=pyro.param('locs').device).float()],
              axis=0).float()
         new_locs[0,:]=torch.tensor(kmeans_means.mean(0)).float()
         self.adata_manager.adata.obs[cluster].astype(int)
-        new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer='X_antipode',obsm=True)[0]
+        new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer=dimension_reduction,obsm=True)[0]
         new_scales=torch.concatenate(
             [1e-5 * self.scale_init_val * new_locs.new_ones(sum(self.level_sizes[:-1]), pyro.param('locs').shape[1],requires_grad=True),
              torch.tensor(new_scales+1e-10,device=pyro.param('scales').device,requires_grad=True)],axis=0).float()
@@ -151,7 +160,7 @@ class AntipodeTrainingMixin:
         while steps < max_steps:
             for x in dataloader:
                 x['step'] = torch.ones(1).to(device) * steps
-                x = [x[k].to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
+                x = [x[k].squeeze(0).to(device) if k in x.keys() else torch.zeros(1) for k in self.args]
                 if self.scale_factor == 1.:
                     self.fix_scale_factor(svi, x)
                 pbar.update(1)
@@ -194,8 +203,12 @@ class AntipodeTrainingMixin:
         supervised_field_types=self.field_types.copy()
         supervised_fields=self.fields.copy()
         supervised_field_types["taxon"]=np.float32
+        if not freeze_encoder and ("Z_obs" in [x.registry_key for x in  self.adata_manager.fields]) and phase == 2: #Running supervised D.R. (can't freeze encoder and run d.r.)
+            supervised_field_types["Z_obs"]=np.float32
         field_types=self.field_types if phase != 2 else supervised_field_types
-        dataloader = scvi.dataloaders.AnnDataLoader(self.adata_manager, batch_size=batch_size, drop_last=True, shuffle=True, data_and_attributes=field_types)
+        sampler=create_weighted_random_sampler(self.adata_manager.adata.obs[self.sampler_category]) if self.sampler_category is not None else create_weighted_random_sampler(pd.Series(["same_category"] * self.adata_manager.adata.shape[0]))
+        sampler= torch.utils.data.BatchSampler(sampler=sampler,batch_size=batch_size,drop_last=True)
+        dataloader = scvi.dataloaders.AnnDataLoader(self.adata_manager, batch_size=batch_size, drop_last=True, sampler=sampler, data_and_attributes=field_types)
         scheduler = self.setup_scheduler(max_learning_rate, max_steps, one_cycle_lr)
         elbo_class = pyro.infer.JitTrace_ELBO
         elbo = elbo_class(num_particles=num_particles, strict_enumeration_warning=False)
@@ -210,12 +223,27 @@ class AntipodeTrainingMixin:
         
     def allDone(self):
         print("Finished training!")
+        self.to('cpu')
         import IPython
         from IPython.display import Audio, display
-        IPython.display.clear_output()
+        IPython.display.clear_output()#Make compatible with jupyter nbconvert
         display(Audio(url='https://notification-sounds.com/soundsfiles/Meditation-bell-sound.mp3', autoplay=True))
+    
+    def clear_cuda(self):
+        '''Throw the kitchen sink at clearing the cuda cache for jupyter notebooks. 
+        Might want to wrap in tryexcept'''
+        import traceback
+        self.to('cpu')
+        torch.cuda.empty_cache()
+        gc.collect()
+        try:
+            a = 1/0 
+        except Exception as e:  
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            traceback.clear_frames(exc_traceback)
 
-class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
+
+class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
     """
     ANTIPODE (Single Cell Ancestral Node Taxonomy Inference by Parcellation of Differential Expression) 
     leverages variational inference for analyzing and categorizing cell types by accounting for biological and batch covariates and discrete and continuous latent variables. This model works by simultaneously integrating evolution-inspired differential expression parcellation, taxonomy generation (clustering) and batch correction.
@@ -233,8 +261,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     prior_scale (float): Scale for the Laplace prior distributions. Defaults to 100. [DANGER]
     dcd_prior (float, optional): Scale for discov_constitutive_de. Use this for missing genes (set to large negative value and rest 0. Zeros if None.
     use_psi (bool): Whether to utilize psi continuous variation parameter. Defaults to True.
-    use_q_score (bool): Whether to use q continuous quality scores. Defaults to True.
-    dist_normalize (bool): Whether to apply distance normalization. Defaults to False.
+    use_q_score (bool): Whether to use q continuous "quality" scores. Defaults to True.
+    dist_normalize (bool): EXPERIMENTAL. Whether to apply distance normalization. Defaults to False.
     z_transform (pytorch function): Function to be applied to latent space (Z) e.g. centered_sigmoid, sigmoid. This will mess up DE Parameter scaling.
     loc_as_param, zdw_as_param, intercept_as_param (bool): Flags for using location, Z decoder weight, and intercept as parameters instead (maximum likelihood inference instead of Laplace MAP), respectively. All default to False.
     theta_prior (float): Initial value for the inverse dispersion of the negative binomial. Defaults to 50. [DANGER]
@@ -246,10 +274,11 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                  num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,
                  use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,
                  num_batch_embed=10,theta_prior=50.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
-                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500]):
+                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],sampler_category=None):
 
         pyro.clear_param_store()
-
+        self.init_args= dict(locals())
+        
         # Determine num_discov and num_batch from the AnnData object
         self.discov_loc, self.discov_key = discov_pair
         self.batch_loc, self.batch_key = batch_pair
@@ -279,6 +308,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
         self.bi_depth = bi_depth
         self.bi_depth = sum(self.level_sizes[:self.bi_depth])
         self.dist_normalize=dist_normalize
+        self.sampler_category=sampler_category
 
         self.dcd_prior=torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
                 
@@ -369,7 +399,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
     def set_freeze_encoder(self,b: bool):
         self.freeze_encoder=b
         
-    def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1)):
+    def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         # Register various nn.Modules (i.e. the decoder/encoder networks) with Pyro
         pyro.module("antipode", self)
 
@@ -392,7 +422,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
             s_theta = pyro.param("s_inverse_dispersion", self.theta_prior * s.new_ones(self.num_var),
                                constraint=constraints.positive)
             #Weak overall histogram normalization
-            discov_mul = pyro.param("discov_mul", s.new_ones(self.num_discov,1),constraint=constraints.positive) if self.dist_normalize else s.new_ones(self.num_discov)
+            discov_mul = pyro.param("discov_mul", s.new_ones(self.num_discov,1),constraint=constraints.positive) if self.dist_normalize else s.new_ones(self.num_discov,1)
 
             dcd=pyro.param("discov_constitutive_de", self.dcd_prior.to(s.device))
             level_edges=self.tree_edges.model_sample(s,approx=self.approx)
@@ -440,8 +470,14 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
                 q = torch.sigmoid(pyro.sample('q',dist.Logistic(s.new_zeros(s.shape[0],1),s.new_ones(s.shape[0],1)).to_event(1))) if self.use_q_score else 1.0
                 this_locs=oh_index(locs,taxon)
                 this_scales=oh_index(scales,taxon)
-                z=pyro.sample('z', dist.Normal(this_locs,this_scales+self.epsilon,validate_args=True).to_event(1))
-                pyro.sample('z_loc', dist.Laplace(this_locs,0.5*self.prior_scale*s.new_ones(s.shape[0],self.num_latent),validate_args=True).to_event(1))
+                z=pyro.sample('z_loc',dist.Laplace(this_locs,0.5*self.prior_scale*s.new_ones(s.shape[0],self.num_latent),validate_args=True).to_event(1))
+                z_dist=dist.Normal(this_locs,this_scales+self.epsilon,validate_args=True).to_event(1)
+                if sum(Z_obs.shape) <=1: 
+                     z=pyro.sample('z', z_dist) 
+                else: #Supervised latent space
+                    print('supervise latent')
+                    z=pyro.sample('z', z_dist)
+                    z=pyro.sample('z_obs', dist.Normal(z,this_scales+self.epsilon,validate_args=True).to_event(1),obs=Z_obs)
 
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
@@ -470,7 +506,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):#
 
     
     # The guide specifies the variational distribution
-    def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1)):
+    def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         pyro.module("antipode", self)
         
         if not self.design_matrix:

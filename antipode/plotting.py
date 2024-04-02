@@ -5,11 +5,10 @@ import scipy
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
-import model_functions
 import tqdm
 import scanpy as sc
 import sklearn
-import model_functions
+from . import model_functions
 
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'valid') / w
