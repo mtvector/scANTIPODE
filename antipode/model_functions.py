@@ -108,20 +108,16 @@ class ZLEncoder(nn.Module):
     
 class ZDecoder(nn.Module):
     '''
-    Neural network has input dimension num_latent and output dimension num_var.
+    Empty class that uses provided weights to multiply by z.
     '''
     def __init__(self, num_latent ,num_var, hidden_dims=[]):
         super().__init__()
-        dims = [num_latent] + hidden_dims + [num_var]
-        #self.fc = make_fc(dims)
-        #self.bn=nn.BatchNorm1d(num_var)
         
     def forward(self,z,weight,delta=None):
         if delta is None:
             mu=torch.einsum('bi,ij->bj',z,weight)
         else:
             mu=torch.einsum('bi,bij->bj',z,weight+delta)
-        #mu=self.bn(mu)
         return mu     
 
 
@@ -342,6 +338,20 @@ class SUTransConvModule(nn.Module):
         x=self.conv2(x)
         s,u=torch.unbind(x,dim=-2)
         return(s,u)
+
+def create_weighted_random_sampler(series):
+    # Count the occurrences of each category in the Series
+    class_counts = series.value_counts()
+    # Calculate the weight for each category (inverse of count)
+    class_weights = 1. / class_counts
+    # Map the weights to the original series to assign a weight to each item
+    weights = series.map(class_weights)
+    # Convert weights to a tensor
+    sample_weights = torch.DoubleTensor(weights.values)
+    # Create the WeightedRandomSampler
+    sampler = torch.utils.data.WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+    return sampler
+
 
 def make_dataloader(origdata=None,adata_path=None,batch_size=32):
     '''
