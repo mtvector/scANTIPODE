@@ -5,7 +5,7 @@
 #SBATCH --time 72:00:00
 #SBATCH --partition celltypes
 #SBATCH --array=1-4 # Create an array job for each line in notebooks.txt
-#SBATCH --gres=gpu:1 --constraint="a100"#|v100
+#SBATCH --gres=gpu:1 --constraint="a100|v100"#
 #SBATCH --mem 128gb
 #SBATCH --ntasks 1
 

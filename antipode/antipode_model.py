@@ -1,4 +1,5 @@
-#Derived from testing version PBS1.9.1.6
+#Derived from testing version PBS1.9.1.8.1
+import os
 import sys
 import sklearn
 from sklearn import cluster
@@ -20,6 +21,10 @@ import pyro.distributions as dist
 import pyro.poutine as poutine
 import pyro.optim
 import re
+import inspect
+from anndata import AnnData
+from mudata import MuData
+from typing import Literal, Optional
 from scvi.module.base import PyroBaseModuleClass
 
 from .model_modules import *
@@ -27,6 +32,7 @@ from .model_distributions import *
 from .model_functions import *
 from .train_utils import *
 from .plotting import *
+
 
 class AntipodeTrainingMixin:
     '''
@@ -63,7 +69,8 @@ class AntipodeTrainingMixin:
         self.allDone()
         taxon=antipode_outs[1][0]
         self.adata_manager.adata.obsm[prefix+'X_antipode']=antipode_outs[0][0]
-        self.adata_manager.adata.obs[prefix+'psi']=numpy_centered_sigmoid(antipode_outs[1][1])
+        for i in range(antipode_outs[1][1].shape[1]):
+            self.adata_manager.adata.obs[prefix+'psi_'+str(i)]=numpy_centered_sigmoid(antipode_outs[1][1][...,i])
         self.adata_manager.adata.obs[prefix+'q_score']=scipy.special.expit(antipode_outs[0][2])
         level_edges=[numpy_hardmax(self.adata_manager.adata.uns[prefix+'param_store']['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
         levels=self.tree_convergence_bottom_up.just_propagate(scipy.special.softmax(taxon[...,-self.level_sizes[-1]:],axis=-1),level_edges,s=torch.ones(1))
@@ -79,7 +86,7 @@ class AntipodeTrainingMixin:
     
     def pretrain_classifier(self,epochs = 5,learning_rate = 0.001,batch_size = 64,prefix='',cluster='kmeans',device='cuda'):
         '''basic pytorch training of feed forward classifier to ease step 2'''        
-        self=self.train()
+        self.train()
         
         model = self.classifier.to(device)
         input_tensor =  torch.tensor(self.adata_manager.adata.obsm[self.dimension_reduction])  # Your input features tensor, shape [n_samples, n_features]
@@ -214,7 +221,7 @@ class AntipodeTrainingMixin:
         elbo = elbo_class(num_particles=num_particles, strict_enumeration_warning=False)
         hide_params=[name for name in pyro.get_param_store() if re.search('encoder',name)]
         guide=self.guide if not self.freeze_encoder else poutine.block(self.guide,hide=hide_params)
-        svi = SafeSVI(self.model, guide, scheduler, elbo,clip_std_multiplier=5.0)  
+        svi = SafeSVI(self.model, guide, scheduler, elbo,clip_std_multiplier=6.0)  
         self.train()
         self.zl_encoder.eval() if self.freeze_encoder else self.zl_encoder.train()
         self = self.to(device)
@@ -242,8 +249,224 @@ class AntipodeTrainingMixin:
             exc_type, exc_value, exc_traceback = sys.exc_info()
             traceback.clear_frames(exc_traceback)
 
+class AntipodeSaveLoadMixin:
+    '''Directly taken and modified from scvi-tools base_model'''
+    def _get_user_attributes(self):
+        """Returns all the self attributes defined in a model class, e.g., `self.is_trained_`."""
+        attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
+        attributes = [a for a in attributes if not (a[0].startswith("__") and a[0].endswith("__"))]
+        attributes = [a for a in attributes if not a[0].startswith("_abc_")]
+        return attributes
 
-class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
+    @classmethod
+    def _initialize_model(cls, adata, attr_dict,param_store_path):
+        """Helper to initialize a model."""
+        try:
+            attr_dict.pop('__class__')
+        except:
+            pass
+        model = cls(adata, **attr_dict)
+        
+        pyro.get_param_store().load(param_store_path)
+        for k in list(pyro.get_param_store()):
+            if '$$$' in k:
+                pyro.get_param_store().__delitem__(k)
+        return model
+
+    def save(
+        self,
+        dir_path: str,
+        prefix: str | None = None,
+        overwrite: bool = False,
+        save_anndata: bool = False,
+        save_kwargs: dict | None = None,
+        **anndata_write_kwargs,
+    ):
+        """Save the state of the model.
+
+        Neither the trainer optimizer state nor the trainer history are saved.
+        Model files are not expected to be reproducibly saved and loaded across versions
+        until we reach version 1.0.
+
+        Parameters
+        ----------
+        dir_path
+            Path to a directory.
+        prefix
+            Prefix to prepend to saved file names.
+        overwrite
+            Overwrite existing data or not. If `False` and directory
+            already exists at `dir_path`, error will be raised.
+        save_anndata
+            If True, also saves the anndata
+        save_kwargs
+            Keyword arguments passed into :func:`~torch.save`.
+        anndata_write_kwargs
+            Kwargs for :meth:`~anndata.AnnData.write`
+        """
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=overwrite)
+
+        file_name_prefix = prefix or ""
+        save_kwargs = save_kwargs or {}
+
+        if save_anndata:
+            file_suffix = ""
+            if isinstance(self.adata_manager.adata, AnnData):
+                file_suffix = "adata.h5ad"
+            elif isinstance(self.adata_manager.adata, MuData):
+                file_suffix = "mdata.h5mu"
+            self.adata_manager.adata.write_h5ad(
+                os.path.join(dir_path, f"{file_name_prefix}{file_suffix}"),
+                **anndata_write_kwargs,
+            )
+
+        model_save_path = os.path.join(dir_path, f"{file_name_prefix}model.pt")
+
+        # save the model state dict and the trainer state dict only
+        model_state_dict = self.state_dict()
+
+        var_names = self.adata_manager.adata.var_names.astype(str)
+        var_names = var_names.to_numpy()
+
+        user_attributes = self.init_args
+        try:
+            user_attributes.pop('adata')
+            user_attributes.pop('self')
+        except:
+            pass
+            
+        pyro.get_param_store().save(os.path.join(dir_path,prefix+'antipode.paramstore'))
+
+        torch.save(
+            {
+                "model_state_dict": model_state_dict,
+                "var_names": var_names,
+                "attr_dict": user_attributes,
+            },
+            model_save_path,
+            **save_kwargs,
+        )
+
+    @classmethod
+    def _validate_var_names(cls,adata, source_var_names):
+        user_var_names = adata.var_names.astype(str)
+        if not np.array_equal(source_var_names, user_var_names):
+            warnings.warn(
+                "var_names for adata passed in does not match var_names of adata used to "
+                "train the model. For valid results, the vars need to be the same and in "
+                "the same order as the adata used to train the model.",
+                UserWarning,
+                stacklevel=settings.warnings_stacklevel,
+            )    
+    
+    @classmethod
+    def _load_saved_files(
+        cls,
+        dir_path: str,
+        load_adata: bool,
+        prefix: Optional[str] = None,
+        is_mudata = False,
+        load_kw_args = {'backed':'r'}
+    ) -> tuple[dict, np.ndarray, dict, AnnData]:
+        """Helper to load saved files."""
+        file_name_prefix = prefix or ""
+    
+        model_file_name = f"{file_name_prefix}model.pt"
+        model_path = os.path.join(dir_path, model_file_name)
+        try:
+            model = torch.load(model_path)
+        except FileNotFoundError as exc:
+            raise ValueError(
+                f"Failed to load model file at {model_path}. "
+                "If attempting to load a saved model from <v0.15.0, please use the util function "
+                "`convert_legacy_save` to convert to an updated format."
+            ) from exc
+    
+        model_state_dict = model["model_state_dict"]
+        var_names = model["var_names"]
+        attr_dict = model["attr_dict"]
+    
+        if load_adata:
+            file_suffix = "adata.h5ad"
+            adata_path = os.path.join(dir_path, f"{file_name_prefix}{file_suffix}")
+            if os.path.exists(adata_path):
+                if is_mudata:
+                    adata = mudata.read(adata_path,**load_kw_args)
+                else:
+                    adata = anndata.read_h5ad(adata_path,**load_kw_args)
+            else:
+                raise ValueError("Save path contains no saved anndata and no adata was passed.")
+        else:
+            adata = None
+
+        return attr_dict, var_names, model_state_dict, adata
+        
+    @classmethod
+    def load(
+        cls,
+        dir_path: str,
+        adata = None,
+        accelerator: str = "auto",
+        device: int | str = "auto",
+        prefix: str | None = None,
+        is_mudata: bool = False, 
+        load_kw_args = {'backed':'r'}
+    ):
+        """Instantiate a model from the saved output.
+
+        Parameters
+        ----------
+        dir_path
+            Path to saved outputs.
+        adata
+            AnnData organized in the same way as data used to train model.
+            It is not necessary to run setup_anndata,
+            as AnnData is validated against the saved `scvi` setup dictionary.
+            If None, will check for and load anndata saved with the model.
+        %(param_accelerator)s
+        %(param_device)s
+        prefix
+            Prefix of saved file names.
+
+        Returns
+        -------
+        Model with loaded state dictionaries.
+
+        Examples
+        --------
+        >>> model = ModelClass.load(save_path, adata)
+        >>> model.get_....
+        """
+        load_adata = adata is None
+
+        (
+            attr_dict,
+            var_names,
+            model_state_dict,
+            new_adata,
+        ) = cls._load_saved_files(
+            dir_path,
+            load_adata,
+            prefix=prefix,
+            is_mudata=is_mudata,
+            load_kw_args=load_kw_args,
+        )
+        
+        adata = new_adata if new_adata is not None else adata
+
+        cls._validate_var_names(adata, var_names)
+        
+        
+        model = cls._initialize_model(adata, attr_dict,os.path.join(dir_path,prefix+'antipode.paramstore'))
+        model.load_state_dict(model_state_dict)
+        model.eval()
+        #,os.path.join(dir_path,'antipode.paramstore')
+        #model._validate_anndata(adata)
+        return model
+
+
+class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin):
     """
     ANTIPODE (Single Cell Ancestral Node Taxonomy Inference by Parcellation of Differential Expression) 
     leverages variational inference for analyzing and categorizing cell types by accounting for biological and batch covariates and discrete and continuous latent variables. This model works by simultaneously integrating evolution-inspired differential expression parcellation, taxonomy generation (clustering) and batch correction.
@@ -272,20 +495,19 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
 
     def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1,10,100],
                  num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,
-                 use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,
+                 use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[1.],
                  num_batch_embed=10,theta_prior=50.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],sampler_category=None):
 
         pyro.clear_param_store()
-        self.init_args= dict(locals())
-        
+        self.init_args = dict(locals())
         # Determine num_discov and num_batch from the AnnData object
         self.discov_loc, self.discov_key = discov_pair
         self.batch_loc, self.batch_key = batch_pair
         self.num_discov = adata.obsm[self.discov_key].shape[-1] if self.discov_loc == 'obsm' else len(adata.obs[self.discov_key].unique())
         self.num_batch = adata.obsm[self.batch_key].shape[-1] if self.batch_loc == 'obsm' else len(adata.obs[self.batch_key].unique())
         self.design_matrix = (self.discov_loc == 'obsm')
-        self.layer=layer
+        self.layer = layer
 
         self._setup_adata_manager_store: dict[str, type[scvi.data.AnnDataManager]] = {}
         self.num_var = adata.layers[layer].shape[-1]
@@ -296,31 +518,32 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
         self.epsilon = 1e-5
         self.approx = False
         self.prior_scale = prior_scale
-        self.use_psi=use_psi
-        self.use_q_score=use_q_score
-        self.loc_as_param=loc_as_param
-        self.zdw_as_param=zdw_as_param
-        self.intercept_as_param=intercept_as_param
-        self.theta_prior=theta_prior
-        self.scale_init_val=scale_init_val
-        self.level_sizes=level_sizes
-        self.num_labels=sum(level_sizes)
+        self.use_psi = use_psi
+        self.use_q_score = use_q_score
+        self.loc_as_param = loc_as_param
+        self.zdw_as_param = zdw_as_param
+        self.intercept_as_param = intercept_as_param
+        self.theta_prior = theta_prior
+        self.scale_init_val = scale_init_val
+        self.level_sizes = level_sizes
+        self.num_labels = sum(level_sizes)
         self.bi_depth = bi_depth
         self.bi_depth = sum(self.level_sizes[:self.bi_depth])
-        self.dist_normalize=dist_normalize
-        self.sampler_category=sampler_category
+        self.dist_normalize = dist_normalize
+        self.sampler_category = sampler_category
+        self.psi_levels = psi_levels
 
-        self.dcd_prior=torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
+        self.dcd_prior = torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
                 
         # Initialize plates to be used during sampling
-        self.var_plate=pyro.plate('var_plate',self.num_var,dim=-1)
-        self.discov_plate=pyro.plate('discov_plate',self.num_discov,dim=-3)
-        self.batch_plate=pyro.plate('batch_plate',self.num_batch,dim=-3)
-        self.latent_plate=pyro.plate('latent_plate',self.num_latent,dim=-1)
-        self.latent_plate2=pyro.plate('latent_plate2',self.num_latent,dim=-2)
-        self.label_plate=pyro.plate('label_plate',self.num_labels,dim=-2)
-        self.batch_embed_plate=pyro.plate('batch_embed_plate',self.num_batch_embed,dim=-3)
-        self.bi_depth_plate=pyro.plate('bi_depth_plate',self.bi_depth,dim=-2)
+        self.var_plate = pyro.plate('var_plate',self.num_var,dim=-1)
+        self.discov_plate = pyro.plate('discov_plate',self.num_discov,dim=-3)
+        self.batch_plate = pyro.plate('batch_plate',self.num_batch,dim=-3)
+        self.latent_plate = pyro.plate('latent_plate',self.num_latent,dim=-1)
+        self.latent_plate2 = pyro.plate('latent_plate2',self.num_latent,dim=-2)
+        self.label_plate = pyro.plate('label_plate',self.num_labels,dim=-2)
+        self.batch_embed_plate = pyro.plate('batch_embed_plate',self.num_batch_embed,dim=-3)
+        self.bi_depth_plate = pyro.plate('bi_depth_plate',self.bi_depth,dim=-2)
 
         #Initialize MAP inference modules
         self.dm=MAPLaplaceModule(self,'discov_dm',[self.num_discov,self.num_labels,self.num_latent],[self.discov_plate,self.label_plate,self.latent_plate])
@@ -335,10 +558,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
         self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         self.qg=MAPLaplaceModule(self,'quality_genes',[1,self.num_var],[self.var_plate],param_only=False)
         
-        self.tree_edges=TreeEdges(self,straight_through=False)
-        self.tree_convergence=TreeConvergence(self)        
-        self.tree_convergence_bottom_up=TreeConvergenceBottomUp(self)        
-        self.z_transform=null_function if z_transform is None else z_transform#centered_sigmoid#torch.special.expit
+        self.tree_edges = TreeEdges(self,straight_through=False)
+        self.tree_convergence_bottom_up = TreeConvergenceBottomUp(self)        
+        self.z_transform = null_function if z_transform is None else z_transform#centered_sigmoid#torch.special.expit
 
         if self.design_matrix:
             fields={'s':('layers',self.layer),
@@ -357,12 +579,12 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
         
         super().__init__()
         # Setup the various neural networks used in the model and guide
-        self.z_decoder=ZDecoder(num_latent=self.num_latent, num_var=self.num_var, hidden_dims=[])        
+        self.z_decoder=ZDecoder(num_latent=self.num_latent, num_var=self.num_var)        
         self.zl_encoder=ZLEncoder(num_var=self.num_var,hidden_dims=encoder_hidden,num_cat_input=self.num_discov,
                     outputs=[(self.num_latent,None),(self.num_latent,softplus),(1,None),(1,softplus)])
         
         self.classifier=Classifier(num_latent=self.num_latent,hidden_dims=classifier_hidden,
-                    outputs=[(self.num_labels,None),(1,None),(1,softplus)])
+                    outputs=[(self.num_labels,None),(len(self.level_sizes),None),(len(self.level_sizes),softplus)])
 
         #Too large to exactly model gene-level batch effects for all cluster x batch
         self.be_nn=SimpleFFNN(in_dim=self.num_batch,hidden_dims=batch_embedder_hidden,
@@ -377,7 +599,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
     def setup_anndata(self,adata: anndata.AnnData,fields,field_types,**kwargs,):
         
         anndata_fields=[make_field(x,self.fields[x]) for x in self.fields.keys()]
-        
+            
         adata_manager = scvi.data.AnnDataManager(
             fields=anndata_fields
         )
@@ -465,8 +687,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
             with minibatch_plate:
                 bi=torch.einsum('...bi,...ijk->...bjk',batch_embed,bei)
                 bi=torch.einsum('...bj,...bjk->...bk',taxon[...,:self.bi_depth],bi)
-                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],1),self.prior_scale*s.new_ones(s.shape[0],1)).to_event(1)))
-                psi = 0 if not self.use_psi or self.approx else psi
+                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],len(self.level_sizes)),self.prior_scale*s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
+                #psi = centered_sigmoid(pyro.sample('psi',dist.Logistic(s.new_zeros(s.shape[0],len(self.level_sizes)),s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
+                psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
+                psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
                 q = torch.sigmoid(pyro.sample('q',dist.Logistic(s.new_zeros(s.shape[0],1),s.new_ones(s.shape[0],1)).to_event(1))) if self.use_q_score else 1.0
                 this_locs=oh_index(locs,taxon)
                 this_scales=oh_index(scales,taxon)
@@ -475,7 +699,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
                 if sum(Z_obs.shape) <=1: 
                      z=pyro.sample('z', z_dist) 
                 else: #Supervised latent space
-                    print('supervise latent')
                     z=pyro.sample('z', z_dist)
                     z=pyro.sample('z_obs', dist.Normal(z,this_scales+self.epsilon,validate_args=True).to_event(1),obs=Z_obs)
 
@@ -483,9 +706,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
             cur_dcd = oh_index(dcd, discov) if self.design_matrix else  dcd[discov_ind]
             
-            z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon)*psi)
+            z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)                
-            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs)*psi)
+            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
             pseudo_z=self.z_transform(pseudo_z)
             z_decoder_weight=self.zdw.model_sample(s,scale=fest([pseudo_z.abs()],-1))
             discov_dc=self.dc.model_sample(s,scale=fest([discov,pseudo_z.abs()],-1))
@@ -539,8 +762,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
                 pyro.sample('z_loc',dist.Delta(z_loc).to_event(1))
                 z=self.z_transform(z)
                 taxon_logits,psi_loc,psi_scale=self.classifier(z)
+                #psi=centered_sigmoid(pyro.sample('psi_loc',dist.Delta(psi_loc).to_event(1)))
                 psi=centered_sigmoid(pyro.sample('psi',dist.Normal(psi_loc,psi_scale+self.epsilon).to_event(1)))
-                psi = 0 if not self.use_psi or self.approx else psi
+                psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
+                psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
                 if self.approx:
                     taxon_dist = dist.Delta(safe_sigmoid(taxon_logits),validate_args=True).to_event(1)
                     taxon_probs = pyro.sample("taxon_probs", taxon_dist)
@@ -569,11 +794,11 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin):
             bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))#maybe should be abs sum bei
             
             if self.design_matrix:
-                z=z+oh_index2(oh_index1(discov_dm,discov_ind),taxon) + oh_index2(oh_index1(batch_dm,batch_ind),taxon)+(oh_index(locs_dynam,taxon)*psi)
+                z=z+oh_index2(oh_index1(discov_dm,discov_ind),taxon) + oh_index2(oh_index1(batch_dm,batch_ind),taxon)+(oh_index(locs_dynam,taxon*psi))
             else:
-                z=z+oh_index2(discov_dm[discov_ind],taxon) + oh_index2(batch_dm[batch_ind],taxon)+(oh_index(locs_dynam,taxon)*psi)
+                z=z+oh_index2(discov_dm[discov_ind],taxon) + oh_index2(batch_dm[batch_ind],taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)
-            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs)*psi)
+            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(discov_dm[discov_ind],taxon_probs) + oh_index2(batch_dm[batch_ind],taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
             pseudo_z=self.z_transform(pseudo_z)
             z_decoder_weight=self.zdw.guide_sample(s,scale=fest([pseudo_z.abs()],-1))
             discov_dc=self.dc.guide_sample(s,scale=fest([discov,pseudo_z.abs()],-1))
