@@ -223,6 +223,7 @@ class hAntipodeTrainingMixin:
 
 class hANTIPODE(PyroBaseModuleClass,hAntipodeTrainingMixin):#
     '''
+    DEPRECATED
     hANTIPODE (hierarchicalized Single Cell Ancestral Node particleomy Inference by Parcellation of Differential Expression) 
     is a variational inference model developed for the simultaneous analysis (DE) and 
     categorization (particleomy generation) of cell types across evolution (or now any covariate) using single-cell RNA-seq data.
