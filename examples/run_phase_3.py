@@ -33,7 +33,7 @@ from antipode.train_utils import *
 import antipode.plotting
 from antipode.plotting import *
 
-max_steps=200000
+max_steps=300000
 batch_key='batch_name'
 discov_key='species'
 layer_key='spliced'
@@ -44,7 +44,7 @@ model_tag=str(sys.argv[2])
 antipode_model=ANTIPODE.load(sys.argv[2],adata=adata,prefix='p2_')
 antipode_model.train()
 
-antipode_model.train_phase(phase=3,max_steps=max_steps,print_every=10000,num_particles=3,device=device, max_learning_rate=5e-4, one_cycle_lr=True, steps=0, batch_size=32)
+antipode_model.train_phase(phase=3,max_steps=max_steps,print_every=10000,num_particles=7,device=device, max_learning_rate=5e-4, one_cycle_lr=True, steps=0, batch_size=64)
 
 antipode_model.store_outputs(device=device,prefix='')
 MDE_KEY = "X_antipode_MDE"
