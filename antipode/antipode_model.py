@@ -141,7 +141,7 @@ class AntipodeTrainingMixin:
             print('quick init')
             self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=32)
         new_locs=torch.concatenate(
-            [pyro.param('locs').new_zeros(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1]),
+            [0.01*torch.randn(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1],device=pyro.param('locs').device),
              torch.tensor(kmeans_means-kmeans_means.mean(0),device=pyro.param('locs').device).float()],
              axis=0).float()
         new_locs[0,:]=torch.tensor(kmeans_means.mean(0)).float()
@@ -267,7 +267,7 @@ class AntipodeSaveLoadMixin:
             pass
         model = cls(adata, **attr_dict)
         
-        pyro.get_param_store().load(param_store_path)
+        pyro.get_param_store().load(param_store_path,map_location='cpu')
         for k in list(pyro.get_param_store()):
             if '$$$' in k:
                 pyro.get_param_store().__delitem__(k)
