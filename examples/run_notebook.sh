@@ -4,7 +4,7 @@
 #SBATCH --error /home/matthew.schmitz/log/nbconvert_%A_%a.err
 #SBATCH --time 72:00:00
 #SBATCH --partition celltypes
-#SBATCH --gres=gpu:1 --constraint="a100"#|v100
+#SBATCH --gres=gpu:1 --constraint="a100|v100"#
 #SBATCH --mem 128gb
 #SBATCH --ntasks 1
 
@@ -15,7 +15,7 @@ source ~/.bashrc
 conda activate pyro
 
 # Read the notebook path for the current array task
-NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/RunRetina-SCVIsupervise.ipynb
+NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder-FixLinit.ipynb
 
 # Command to run jupyter nbconvert
 jupyter nbconvert --ExecutePreprocessor.allow_errors=True --to html --execute "${NOTEBOOK}" --output ~/Matthew/code/scANTIPODE/examples/outputs/"executed_$(basename "${NOTEBOOK}")" 

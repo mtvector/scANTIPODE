@@ -1,17 +1,10 @@
 import torch
 import torch.nn as nn
-from torch.distributions import constraints
 import numpy as np
 import tqdm
 import pyro
 import scipy
 from torch.nn.functional import softplus, softmax
-from torch.optim import Adam
-import seaborn
-import pyro
-import pyro.distributions as dist
-import pyro.poutine as poutine
-from pyro.ops.indexing import Vindex
 import scanpy as sc
 import math
 import scvi
@@ -29,6 +22,9 @@ def centered_sigmoid(x):
 def numpy_centered_sigmoid(x):
     return((scipy.special.expit(x)-0.5)*2)
 
+def numpy_relu(x):
+    return x*(x>0)
+
 def safe_softmax(x,dim=-1,eps=1e-10):
     x=torch.softmax(x,dim)
     x=x+eps
@@ -43,349 +39,139 @@ def param_store_to_numpy():
         store[name]=pyro.param(name).cpu().detach().numpy()
     return store
 
+def get_field(adata,loc):
+    return adata.__getattribute__(loc[0]).__getattribute__(loc[1])
 
-def indexing_none_list(n):
-    '''create unsqueeze n times. Negative values go to the end of the list; positive the front (for fest)'''
-    none_list = [...]
-    if n == 0:
-        return none_list
-    abs_n = abs(n)
+def moving_average(x, w):
+    return np.convolve(x, np.ones(w), 'valid') / w
 
-    for _ in range(abs_n):
-        if n < 0:
-            none_list.append(None)
-        else:
-            none_list.insert(0, None)
-    return none_list
+def numpy_onehot(x,num_classes=None):
+    n_values = np.max(x) + 1
+    if num_classes is None or num_classes<n_values:
+        num_classes=n_values
+    return np.eye(num_classes)[x]
 
-def fest(tensors,unsqueeze=0,epsilon=1e-10):
-    '''
-    flexible_einsum_scale_tensor, first dimension must be equal for list of tensors
-    Multiplies out marginals to construct joint
-    '''
-    einsum_str = ','.join(f'...z{chr(65 + i)}' for i, _ in enumerate(tensors))
-    einsum_str += '->...' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
-    out=torch.einsum(einsum_str, *[x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
-    #print(out.shape)
-    return [poutine.scale(scale=out+epsilon)]
+def numpy_hardmax(x,axis=-1):
+    return(numpy_onehot(x.argmax(axis).flatten(),num_classes=x.shape[axis]))
 
-class ZLEncoder(nn.Module):
-    '''
-    Takes tensor of size (batch,num_var) input (for now)
+def calculate_layered_tree_means(X, level_assignments):
+    """
+    Calculates and adjusts means for clusters at each level according to the hierarchical structure,
+    dynamically handling any number of layers, make sure layer size L+1 > L.
+    :param level_assignments: A list of arrays, where each array gives the cluster assignment at each level.
+    :return: A dictionary containing the adjusted means for each level.
+    """
+    means = {}
+    adjusted_means = {}
 
-        Args:
-        num_var (integer): size of input variables (e.g. number of genes)
-        outputs ([(),()]): example [(self.z_dim,None),(self.z_dim,softplus),(1,None),(1,softplus),(1,None),(1,softplus)]
-        hidden_dims ([integer]) 
-    '''
-    def __init__(self, num_var, outputs, hidden_dims=[],num_cat_input=0,hidden_conv_channels=4,conv_out_channels=1):
-        super().__init__()
-        self.num_cat_input=num_cat_input
-        self.output_dim=[x[0] for x in outputs] 
-        self.output_transform=[x[1] for x in outputs]
-        self.cumsums=np.cumsum(self.output_dim)
-        self.cumsums=np.insert(self.cumsums,0,0)
-        self.dims = [conv_out_channels*num_var+self.num_cat_input+1] + hidden_dims + [self.cumsums[-1]]
-        self.fc = make_fc(self.dims,dropout=True)
+    # Calculate initial means for each level
+    for level, assignments in enumerate(level_assignments, start=1):
+        unique_clusters = np.unique(assignments)
+        means[level] = {cluster: X[assignments.flatten() == cluster].mean(axis=0) for cluster in unique_clusters}
 
-    def forward(self, s,species=None):
-        # Transform the counts x to log space for increased numerical stability.
-        # Note that we only use this transformation here; in particular the observation
-        # distribution in the model is a proper count distribution.
-        s_sum=torch.log(1 + s.sum(-1).unsqueeze(-1))
-        s = torch.log(1 + s)
-        if species is None:
-            x=self.fc(torch.cat([s,s_sum],dim=-1))
-        else:
-            x=self.fc(torch.cat([s,species,s_sum],dim=-1))
-        return_list=[]
-        for i in range(len(self.cumsums)-1):
-            if self.output_transform[i] is None:
-                return_list.append(x[:,self.cumsums[i]:self.cumsums[i+1]])
-            else:
-                return_list.append(self.output_transform[i](x[:,self.cumsums[i]:self.cumsums[i+1]]))
-        return(return_list)    
+    # Adjust means for each level
+    for level in range(1, len(level_assignments) + 1):
+        adjusted_means[level] = {}
+        for cluster_id, cluster_mean in means[level].items():
+            adjusted_mean = np.copy(cluster_mean)
+            # Subtract the means of all ancestor levels
+            for ancestor_level in range(1, level):
+                # Find the closest ancestor cluster for each cluster
+                ancestor_cluster = level_assignments[ancestor_level - 1][np.argwhere(level_assignments[level-1] == cluster_id)[0][0]]
+                adjusted_mean -= means[ancestor_level][ancestor_cluster[0]]
+            adjusted_means[level][cluster_id] = adjusted_mean
+
+    return adjusted_means
+
+def create_edge_matrices(level_assignments):
+    """
+    Creates adjacency matrices for each layer based on level assignments (like output from scipy.cluster.hierarchy.cut_tree) .
     
-class ZDecoder(nn.Module):
-    '''
-    Empty class that uses provided weights to multiply by z.
-    '''
-    def __init__(self, num_latent ,num_var, hidden_dims=[]):
-        super().__init__()
+    :param level_assignments: A list of np arrays, where each array gives the cluster assignment at each level.
+    :return: A list of adjacency matrices for each layer transition.
+    """
+    adjacency_matrices = []
+
+    for i in range(len(level_assignments) - 1):
+        current_level = level_assignments[i]
+        next_level = level_assignments[i+1]
         
-    def forward(self,z,weight,delta=None):
-        if delta is None:
-            mu=torch.einsum('bi,ij->bj',z,weight)
-        else:
-            mu=torch.einsum('bi,bij->bj',z,weight+delta)
-        return mu     
-
-
-class Classifier(nn.Module):
-    '''
-    Simple FFNN with output splitting
-    '''
-    def __init__(self, num_latent, outputs,hidden_dims=[2000,2000,2000]):
-        super().__init__()
-        self.output_dim=[x[0] for x in outputs] 
-        self.output_transform=[x[1] for x in outputs]
-        self.cumsums=np.cumsum(self.output_dim)
-        self.cumsums=np.insert(self.cumsums,0,0)
-        self.dims = [num_latent] + hidden_dims + [self.cumsums[-1]]
-        self.fc = make_fc(self.dims,dropout=False)
-
-    def forward(self, z):
-        x=self.fc(z)
-        return_list=[]
-        for i in range(len(self.cumsums)-1):
-            if self.output_transform[i] is None:
-                return_list.append(x[:,self.cumsums[i]:self.cumsums[i+1]])
-            else:
-                return_list.append(self.output_transform[i](x[:,self.cumsums[i]:self.cumsums[i+1]]))
-        return(return_list)   
-
-    
-class DMCorrectOutput(nn.Module):
-    '''
-    Subtracts/adds back DM from latent space.(shouldn't be necessary unless using archaic model)
-    '''
-    def __init__(self, species_dm,batch_dm):
-        super().__init__()
-        self.species_dm=species_dm
-        self.batch_dm=batch_dm
+        # Determine the unique number of clusters at each level for the dimensions of the one-hot encodings
+        num_clusters_current = len( np.unique(current_level))
+        num_clusters_next = len(np.unique(next_level))
         
-    def forward(self, x,o2,batch_values,species_values):
-        return((x-
-                 torch.einsum('bi,bij->bj',o2,
-                              pyro.param('batch_dm')[batch_values.argmax(1),...])-
-                 torch.einsum('bi,bij->bj',o2,
-                              pyro.param('species_dm')[species_values.argmax(1),...])))          
+        # Create one-hot encodings for each level
+        one_hot_current = numpy_onehot(current_level.flatten(), num_classes=num_clusters_current)
+        one_hot_next = numpy_onehot(next_level.flatten(), num_classes=num_clusters_next)
+        adjacency_matrix = one_hot_current.T @ one_hot_next
+        
+        # Normalize the adjacency matrix to have binary entries (1 for connection, 0 for no connection)
+        adjacency_matrix = (adjacency_matrix > 0).astype(np.float64)
+
+        adjacency_matrices.append(adjacency_matrix)
     
-class SimpleFFNN(nn.Module):
-    '''Basic feed forward neural network'''
-    def __init__(self, in_dim, hidden_dims, out_dim):
-        super().__init__()
-        dims = [in_dim] + hidden_dims + [out_dim]
-        self.fc = make_fc(dims,dropout=True)
+    return adjacency_matrices
 
-    def forward(self, x):
-        return self.fc(x)
+
+def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False):
+    """
+    Calculate the aggregated value (default is mean) for each column for each group combination in an AnnData object,
+    returning a numpy array of the shape [cat_size0, cat_size1, ..., num_variables] and a dictionary of category orders.
     
-def mixture(x,y,psi):
-    return((psi*x)+((1-psi)*y))
-
-class TGeN(nn.Module):
-    '''Trajectory Generator Network'''
-    def __init__(self, in_dim, hidden_dim):
-        super().__init__()
-        self.linear1=nn.Linear(in_dim, hidden_dim,bias=True)
-        self.relu=nn.ReLU()
-        self.bn1=torch.nn.BatchNorm1d(hidden_dim)
-        self.bn2=torch.nn.BatchNorm1d(hidden_dim)
-        #self.bn3=torch.nn.BatchNorm1d(hidden_dim)
-        self.conv1=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=1)
-        self.conv2=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=1)
-        #self.conv3=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=hidden_dim)
-
-    def forward(self, x,out_weights=None):
-        x=self.relu(self.bn1(self.linear1(x)))
-        x=self.relu(self.conv1(x.unsqueeze(-1)).squeeze())#
-        x=self.bn2(self.conv2(x.unsqueeze(-1)).squeeze())
-        #x=self.bn3(self.conv3(x.unsqueeze(-1)).squeeze())
-        return x
-
-def softplus_sum(z):
-    '''Transforms to simplex in linear space rather than softplus' exponential'''
-    z=torch.nn.functional.relu(z)
-    z=z+1e-8
-    z=z/z.sum(-1).reshape(-1,1)
-    return(z)
-
-def beta_parameters_from_mean_variance(mu, sigma_squared):
-    '''Calculate beta distribution parameters given mu and sigma^2'''
-    a = mu * (mu * (1 - mu) - sigma_squared) / sigma_squared
-    b = a * (1 / mu - 1)
-    return a, b
-
-def index_to_onehot(index, out_shape):
-    if sum(index.shape) == 1:
-        index=torch.zeros(out_shape)
-    else:
-        index=torch.nn.functional.one_hot(index.squeeze(),num_classes=out_shape[1]).float() if index.shape[-1]==1 else index
-    return index
-
-def oh_index(mat,ind):
-    '''
-    treat onehot as categorical index for 2d input
-    '''
-    return(torch.einsum('...ij,...bi->...bj',mat,ind))
-
-def oh_index1(mat,ind):
-    '''
-    treat onehot as categorical index for 3d input
-    '''
-    return(torch.einsum('...ijk,...bi->...bjk',mat,ind))
-
-def oh_index2(mat,ind):
-    '''
-    treat onehot as categorical index for 3d input
-    '''
-    return(torch.einsum('...bij,...bi->...bj',mat,ind))
-
-def add_cats_uns(adata,column,uns_name=None):
-    if uns_name is None:
-        uns_name=column+'_cats'
-    adata.uns[uns_name]=dict(zip([str(x) for x in adata.obs[column].cat.categories],[str(x) for x in sorted(set(adata.obs[column].cat.codes))]))
-
-def gen_exponential_decay(a):
-    def exponential_decay(x, k):
-        return k - (k - 1) * torch.exp(-a * x)
-    return exponential_decay  # Corrected to return the inner function
-
-def gen_linear_function(n, start_point):
-    def linear_function(x, k):
-        if x < start_point:
-            return 1
-        else:
-            return 1 + ((k - 1) / (n - start_point)) * (x - start_point)
-    return linear_function
-
-def make_fc(dims,dropout=False):
-    '''
-    Helper for making fully-connected neural networks from tutorial
-    '''
-    layers = []
-    for in_dim, out_dim in zip(dims, dims[1:]):
-        layers.append(nn.Linear(in_dim, out_dim,bias=False))
-        if dropout:
-            layers.append(nn.Dropout(0.05))
-        layers.append(nn.BatchNorm1d(out_dim))
-        layers.append(nn.LeakyReLU())
-    return nn.Sequential(*layers[:-1])  # Exclude final ReLU non-linearity
-
-def enumeratable_bn(x,bn):
-    '''
-    Batch norm that can work with categorical enumeration, from scANVI tutorial
-    '''
-    if len(x.shape) > 2:
-        _x = x.reshape(-1, x.size(-1))
-        _x=bn(_x)
-        x = _x.reshape(x.shape[:-1] + _x.shape[-1:])
-    else:
-        x=bn(x)
-    return(x)
-
-def split_in_half(t):
-    '''
-    Splits a tensor in half along the final dimension from tutorial
-    '''
-    return t.reshape(t.shape[:-1] + (2, -1)).unbind(-2)
-
-def stick_break(beta):
-    '''
-    Stick breaking process using Beta distributed values along the last dimension
-    '''
-    beta1m_cumprod = (1 - beta).cumprod(-1)
-    return torch.nn.functional.pad(beta, (0, 1), value=1) * torch.nn.functional.pad(beta1m_cumprod, (1, 0), value=1)
-
-def init_kaiming_weight(wt):
-    '''
-    Initialize weights by kaiming uniform
-    '''
-    torch.nn.init.kaiming_uniform_(wt, a=math.sqrt(5))
+    :param ad: AnnData object
+    :param category_column_names: List of column names in ad.obs pointing to categorical variables
+    :param agg_func: Aggregation function to apply (e.g., np.mean, np.std). Default is np.mean.
+    :param layer: Specify if a particular layer of the AnnData object is to be used.
+    :param obsm: Boolean indicating whether to use data from .obsm attribute.
+    :return: Numpy array of calculated aggregates and a dictionary with category orders.
+    """
+    if not category_column_names:
+        raise ValueError("category_column_names must not be empty")
     
-def init_uniform_bias(bs,wt):
-    '''
-    Initialize biases by kaiming uniform
-    '''
-    fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(wt)
-    bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-    torch.nn.init.uniform_(bs, -bound, bound)    
+    # Ensure category_column_names are in a list if only one was provided
+    if isinstance(category_column_names, str):
+        category_column_names = [category_column_names]
 
-class SUConvModule(nn.Module):
-    '''
-    Original SU combo module maintains information within channel
-    '''
-    def __init__(self, num_var,hidden_channels=4,out_channels=2):
-        super().__init__()
-        self.conv=torch.nn.Conv1d(2,hidden_channels,kernel_size=(1,), stride=(1,),bias=True)
-        self.relu=torch.nn.ReLU()
-        self.conv2=torch.nn.Conv1d(hidden_channels,out_channels,kernel_size=(1,), stride=(1,),bias=False)
-        self.bn1=torch.nn.LayerNorm(num_var,hidden_channels)
-        self.bn2=torch.nn.BatchNorm1d(out_channels*num_var)
+    # Initialize dictionary for category orders
+    category_orders = {}
 
-    def forward(self, s,u):
-        x=self.conv(torch.stack([s,u],dim=1))#self.bn1(
-        x=self.relu(x)
-        x=self.bn2(torch.flatten(self.conv2(x),start_dim=1,end_dim=-1))
-        return(x)
+    # Determine the size for each categorical variable and prepare indices
+    for cat_name in category_column_names:
+        categories = ad.obs[cat_name].astype('category')
+        category_orders[cat_name] = categories.cat.categories.tolist()
+
+    # Calculate the product of category sizes to determine the shape of the result array
+    category_sizes = [len(category_orders[cat]) for cat in category_column_names]
+    num_variables = ad.shape[1] if not obsm else ad.obsm[layer].shape[-1]
+    result_shape = category_sizes + [num_variables]
+    result = np.zeros(result_shape, dtype=np.float64)
+
+    # Iterate over all combinations of category values
+    for indices, combination in enumerate(tqdm.tqdm(np.ndindex(*category_sizes), total=np.prod(category_sizes))):
+        # Convert indices to category values
+        category_values = [category_orders[cat][index] for cat, index in zip(category_column_names, combination)]
+        
+        # Create a mask for rows matching the current combination of category values
+        mask = np.ones(len(ad), dtype=bool)
+        for cat_name, cat_value in zip(category_column_names, category_values):
+            mask &= ad.obs[cat_name].values == cat_value
+        
+        selected_indices = np.where(mask)[0]
+        
+        if selected_indices.size > 0:
+            if obsm:
+                data = ad.obsm[layer][selected_indices]
+            else:
+                data = ad[selected_indices].X if layer is None else ad[selected_indices].layers[layer]
+
+            # Convert sparse matrix to dense if necessary
+            if isinstance(data, np.ndarray):
+                dense_data = data
+            else:
+                dense_data = data.toarray()
+            
+            # Apply the aggregation function and assign to the result
+            result[combination] = agg_func(dense_data, axis=0)
+
     
-class SUTransConvModule(nn.Module):
-    '''
-    Original SU transpose conv module maintains information within channel
-    '''
-    def __init__(self, num_var,hidden_channels=4,out_channels=2):
-        super().__init__()
-        self.conv=torch.nn.ConvTranspose1d(1,hidden_channels,kernel_size=(1,), stride=(1,),bias=True)
-        self.relu=torch.nn.ReLU()
-        self.conv2=torch.nn.ConvTranspose1d(hidden_channels,out_channels,kernel_size=(1,), stride=(1,),bias=False)
-        self.bn1=torch.nn.LayerNorm(num_var,hidden_channels)
-        self.bn2=torch.nn.BatchNorm1d(out_channels*num_var)
-
-    def forward(self, x):
-        x=self.conv(x.unsqueeze(1))#self.bn1(
-        x=self.relu(x)
-        x=self.conv2(x)
-        s,u=torch.unbind(x,dim=-2)
-        return(s,u)
-
-def create_weighted_random_sampler(series):
-    # Count the occurrences of each category in the Series
-    class_counts = series.value_counts()
-    # Calculate the weight for each category (inverse of count)
-    class_weights = 1. / class_counts
-    # Map the weights to the original series to assign a weight to each item
-    weights = series.map(class_weights)
-    # Convert weights to a tensor
-    sample_weights = torch.DoubleTensor(weights.values)
-    # Create the WeightedRandomSampler
-    sampler = torch.utils.data.WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
-    return sampler
-
-
-def make_dataloader(origdata=None,adata_path=None,batch_size=32):
-    '''
-    Loads anndata chunks (specific for development dataset)
-    Retained for old model version compatibility
-    '''
-    import gc    
-    if adata_path is not None:
-        adata=sc.read_h5ad(adata_path)
-    else:
-        print('Provide a path')
-    if origdata is not None:
-        adata=adata[:,adata.var.index.isin(origdata.var.index)]
-    
-    #adata.obs['species']=adata.obs['species'].astype('category')
-    species_arg=adata.obs['species'].cat.codes
-    species_values=torch.nn.functional.one_hot(torch.tensor(adata.obs['species'].cat.codes).long(),num_classes=len(adata.obs['species'].cat.categories)).float()
-
-    #adata.obs['batch_name']=adata.obs['batch_name'].astype('category')
-    batch_arg=adata.obs['batch_name'].replace(adata.uns['batch_cats']).astype(int)
-    batch_values=torch.nn.functional.one_hot(torch.tensor(adata.obs['batch_name'].replace(adata.uns['batch_cats']).astype(int)).long(),
-                                             num_classes=len(adata.uns['batch_cats'].keys())).float()
-    
-    #adata.obs['region_species']=adata.obs['sample_region'].astype(str)+'_'+adata.obs['species'].astype(str)
-    class_weights = adata.obs['region_species'].astype('category').cat.codes.value_counts(normalize=False,sort=False).sort_index()
-    labels = adata.obs['region_species'].astype('category').cat.codes #corresponding labels of samples
-    weights = [1/class_weights[labels[i]] for i in range(len(labels))]
-    sampler = torch.utils.data.sampler.WeightedRandomSampler(torch.DoubleTensor(weights),len(weights),replacement=True)
-
-    spliced_counts=adata.layers['spliced']
-    del adata
-    gc.collect()
-    d=torch.utils.data.TensorDataset(torch.tensor(spliced_counts.todense()),species_values,batch_values)
-    del spliced_counts
-    gc.collect()
-    dataloader = torch.utils.data.DataLoader(d,sampler=sampler, batch_size=batch_size,drop_last=True)
-    return(dataloader)
+    return result, category_orders
