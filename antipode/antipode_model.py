@@ -44,6 +44,7 @@ class AntipodeTrainingMixin:
     def save_params_to_uns(self,prefix=''):
         pstore=param_store_to_numpy()
         pstore={n:pstore[n] for n in pstore.keys() if not re.search('encoder|classifier|be_nn|\$\$\$',n)}
+        pstore={n:pstore[n] for n in pstore.keys() if not np.isnan(pstore[n]).any()}
         self.adata_manager.adata.uns[prefix+'param_store']=pstore
 
     def get_antipode_outputs(self,batch_size=2048,device='cuda'):
@@ -57,7 +58,7 @@ class AntipodeTrainingMixin:
         encoder_outs=batch_output_from_dataloader(dataloader,self.zl_encoder,batch_size=batch_size,device=device)
         encoder_outs[0]=self.z_transform(encoder_outs[0])
         encoder_out=[x.detach().cpu().numpy() for x in encoder_outs]
-        classifier_outs=batch_torch_outputs([(self.z_transform(encoder_outs[0]))],self.classifier,batch_size=batch_size,device='cuda')
+        classifier_outs=batch_torch_outputs([(encoder_outs[0])],self.classifier,batch_size=batch_size,device='cuda')
         classifier_out=[x.detach().cpu().numpy() for x in classifier_outs]
         return encoder_out,classifier_out
 
@@ -117,7 +118,7 @@ class AntipodeTrainingMixin:
         s2=ideal_val*s1/o1
         self.scale_factor=s2
 
-    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device='cuda',dimension_reduction='X_antipode'):
+    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device=None,dimension_reduction='X_antipode'):
         '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), 
         runs kmeans if cluster=kmeans, else uses the obs column provided by cluster. epochs=None skips pretraing of classifier
         To learn a latent space from scratch set dimension_reduction to None and use freeze_encoder=False'''
@@ -129,7 +130,7 @@ class AntipodeTrainingMixin:
         else:
             self.adata_manager.adata.obs[cluster]=self.adata_manager.adata.obs[cluster].astype('category')
             self.adata_manager.adata.obsm[cluster+'_onehot']=numpy_onehot(self.adata_manager.adata.obs[cluster].cat.codes,num_classes=self.level_sizes[-1])
-        
+        device=pyro.param('locs').device if device is None else device
         self.adata_manager.register_new_fields([make_field('taxon',('obsm',cluster+'_onehot'))])
         if dimension_reduction is not None:#For supervised Z register dr
             self.dimension_reduction=dimension_reduction
@@ -139,17 +140,26 @@ class AntipodeTrainingMixin:
         kmeans_means=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.mean,layer=dimension_reduction,obsm=True)[0]
         if 'locs' not in [x for x in pyro.get_param_store()]:
             print('quick init')
-            self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=32)
-        new_locs=torch.concatenate(
-            [0.01*torch.randn(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1],device=pyro.param('locs').device),
-             torch.tensor(kmeans_means-kmeans_means.mean(0),device=pyro.param('locs').device).float()],
-             axis=0).float()
-        new_locs[0,:]=torch.tensor(kmeans_means.mean(0)).float()
+            self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=4)
+            self.cpu()
+
+        hierarchy=scipy.cluster.hierarchy.ward(kmeans_means)
+        level_assignments=[scipy.cluster.hierarchy.cut_tree(hierarchy,n_clusters=x) for x in self.level_sizes]
+        adj_means_dict=calculate_layered_tree_means(kmeans_means, level_assignments)
+        new_clusts=[adj_means_dict[k][j] for k in adj_means_dict.keys() for j in adj_means_dict[k].keys()]
+        new_locs=torch.tensor(new_clusts,device=device).float()
+        
+        edge_matrices=create_edge_matrices(level_assignments)
+        edge_matrices=[torch.tensor(x,device=device) for x in edge_matrices]
+        for i in range(len(self.level_sizes)-1):
+            #pyro.get_param_store().__setitem__('edges_'+str(i), pyro.param('edges_'+str(i)).detach()+edge_matrices[i].T)
+            pyro.get_param_store().__setitem__('edges_'+str(i), 1e-4*torch.randn(edge_matrices[i].T.shape,device=device).float()+edge_matrices[i].T.float())
+        
         self.adata_manager.adata.obs[cluster].astype(int)
         new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer=dimension_reduction,obsm=True)[0]
         new_scales=torch.concatenate(
             [1e-5 * self.scale_init_val * new_locs.new_ones(sum(self.level_sizes[:-1]), pyro.param('locs').shape[1],requires_grad=True),
-             torch.tensor(new_scales+1e-10,device=pyro.param('scales').device,requires_grad=True)],axis=0).float()
+             torch.tensor(new_scales+1e-10,device=device,requires_grad=True)],axis=0).float()
         self.adata_manager.adata.obs[cluster].astype(str)
         pyro.get_param_store().__setitem__('locs',new_locs)
         pyro.get_param_store().__setitem__('locs_dynam',new_locs.new_zeros(new_locs.shape))
@@ -259,7 +269,7 @@ class AntipodeSaveLoadMixin:
         return attributes
 
     @classmethod
-    def _initialize_model(cls, adata, attr_dict,param_store_path):
+    def _initialize_model(cls, adata, attr_dict,param_store_path,device):
         """Helper to initialize a model."""
         try:
             attr_dict.pop('__class__')
@@ -267,7 +277,7 @@ class AntipodeSaveLoadMixin:
             pass
         model = cls(adata, **attr_dict)
         
-        pyro.get_param_store().load(param_store_path,map_location='cpu')
+        pyro.get_param_store().load(param_store_path,map_location=device)
         for k in list(pyro.get_param_store()):
             if '$$$' in k:
                 pyro.get_param_store().__delitem__(k)
@@ -310,22 +320,11 @@ class AntipodeSaveLoadMixin:
         file_name_prefix = prefix or ""
         save_kwargs = save_kwargs or {}
 
-        if save_anndata:
-            file_suffix = ""
-            if isinstance(self.adata_manager.adata, AnnData):
-                file_suffix = "adata.h5ad"
-            elif isinstance(self.adata_manager.adata, MuData):
-                file_suffix = "mdata.h5mu"
-            self.adata_manager.adata.write_h5ad(
-                os.path.join(dir_path, f"{file_name_prefix}{file_suffix}"),
-                **anndata_write_kwargs,
-            )
-
         model_save_path = os.path.join(dir_path, f"{file_name_prefix}model.pt")
 
         # save the model state dict and the trainer state dict only
         model_state_dict = self.state_dict()
-
+        
         var_names = self.adata_manager.adata.var_names.astype(str)
         var_names = var_names.to_numpy()
 
@@ -347,6 +346,18 @@ class AntipodeSaveLoadMixin:
             model_save_path,
             **save_kwargs,
         )
+        
+        if save_anndata:
+            file_suffix = ""
+            if isinstance(self.adata_manager.adata, AnnData):
+                file_suffix = "adata.h5ad"
+            elif isinstance(self.adata_manager.adata, MuData):
+                file_suffix = "mdata.h5mu"
+            self.adata_manager.adata.write_h5ad(
+                os.path.join(dir_path, f"{file_name_prefix}{file_suffix}"),
+                **anndata_write_kwargs,
+            )
+
 
     @classmethod
     def _validate_var_names(cls,adata, source_var_names):
@@ -458,7 +469,7 @@ class AntipodeSaveLoadMixin:
         cls._validate_var_names(adata, var_names)
         
         
-        model = cls._initialize_model(adata, attr_dict,os.path.join(dir_path,prefix+'antipode.paramstore'))
+        model = cls._initialize_model(adata, attr_dict,os.path.join(dir_path,prefix+'antipode.paramstore'),device=device)
         model.load_state_dict(model_state_dict)
         model.eval()
         #,os.path.join(dir_path,'antipode.paramstore')
@@ -792,7 +803,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             discov_di=self.di.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon_probs],-1))
             bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))#maybe should be abs sum bei
-            
+            #For scaling
             if self.design_matrix:
                 z=z+oh_index2(oh_index1(discov_dm,discov_ind),taxon) + oh_index2(oh_index1(batch_dm,batch_ind),taxon)+(oh_index(locs_dynam,taxon*psi))
             else:

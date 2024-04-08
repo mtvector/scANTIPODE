@@ -13,12 +13,11 @@ from . import model_functions
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'valid') / w
 
-
 def plot_loss(loss_tracker):
     '''Plots vector of values along with moving average'''
     seaborn.scatterplot(x=list(range(len(loss_tracker))),y=loss_tracker,alpha=0.5,s=2)
     w=300
-    mvavg=moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
+    mvavg=model_functions.moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
     seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,color='coral')
     plt.show()
 
@@ -27,7 +26,7 @@ def plot_grad_norms(antipode_model):
     ax = plt.subplot(111)
     w=300
     for i,(name, grad_norms) in enumerate(antipode_model.gradient_norms.items()):
-        mvavg=moving_average(np.pad(grad_norms,int(w/2),mode='edge'),w)
+        mvavg=model_functions.moving_average(np.pad(grad_norms,int(w/2),mode='edge'),w)
         seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,label=name,color=sc.pl.palettes.godsnot_102[i%102],ax=ax,linewidth = 1.)
     plt.xlabel("iters")
     plt.ylabel("gradient norm")
@@ -83,6 +82,7 @@ def plot_batch_embedding_pca(antipode_model):
         print('plot failed')
 
 def plot_d_hists(antipode_model):
+    """plot deltas from antipode model parameters"""
     categories=antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['categorical_mapping']
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
     param_store=antipode_model.adata_manager.adata.uns['param_store']
@@ -119,7 +119,7 @@ def plot_gmm_heatmaps(antipode_model):
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
     param_store=antipode_model.adata_manager.adata.uns['param_store']
 
-    seaborn.clustermap(antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy(),cmap='coolwarm')
+    seaborn.clustermap(antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy(),metric='correlation',cmap='coolwarm')
     plt.title('locs')
     plt.show()
 
@@ -134,69 +134,6 @@ def plot_gmm_heatmaps(antipode_model):
     seaborn.histplot(param_store['s_inverse_dispersion'].flatten(),color='grey',bins=50)
     plt.title('inverse_dispersion')
     plt.show()
-
-def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False):
-    """
-    Calculate the aggregated value (default is mean) for each column for each group combination in an AnnData object,
-    returning a numpy array of the shape [cat_size0, cat_size1, ..., num_variables] and a dictionary of category orders.
-    
-    :param ad: AnnData object
-    :param category_column_names: List of column names in ad.obs pointing to categorical variables
-    :param agg_func: Aggregation function to apply (e.g., np.mean, np.std). Default is np.mean.
-    :param layer: Specify if a particular layer of the AnnData object is to be used.
-    :param obsm: Boolean indicating whether to use data from .obsm attribute.
-    :return: Numpy array of calculated aggregates and a dictionary with category orders.
-    """
-    if not category_column_names:
-        raise ValueError("category_column_names must not be empty")
-    
-    # Ensure category_column_names are in a list if only one was provided
-    if isinstance(category_column_names, str):
-        category_column_names = [category_column_names]
-
-    # Initialize dictionary for category orders
-    category_orders = {}
-
-    # Determine the size for each categorical variable and prepare indices
-    for cat_name in category_column_names:
-        categories = ad.obs[cat_name].astype('category')
-        category_orders[cat_name] = categories.cat.categories.tolist()
-
-    # Calculate the product of category sizes to determine the shape of the result array
-    category_sizes = [len(category_orders[cat]) for cat in category_column_names]
-    num_variables = ad.shape[1] if not obsm else ad.obsm[layer].shape[-1]
-    result_shape = category_sizes + [num_variables]
-    result = np.zeros(result_shape, dtype=np.float64)
-
-    # Iterate over all combinations of category values
-    for indices, combination in enumerate(tqdm.tqdm(np.ndindex(*category_sizes), total=np.prod(category_sizes))):
-        # Convert indices to category values
-        category_values = [category_orders[cat][index] for cat, index in zip(category_column_names, combination)]
-        
-        # Create a mask for rows matching the current combination of category values
-        mask = np.ones(len(ad), dtype=bool)
-        for cat_name, cat_value in zip(category_column_names, category_values):
-            mask &= ad.obs[cat_name].values == cat_value
-        
-        selected_indices = np.where(mask)[0]
-        
-        if selected_indices.size > 0:
-            if obsm:
-                data = ad.obsm[layer][selected_indices]
-            else:
-                data = ad[selected_indices].X if layer is None else ad[selected_indices].layers[layer]
-
-            # Convert sparse matrix to dense if necessary
-            if isinstance(data, np.ndarray):
-                dense_data = data
-            else:
-                dense_data = data.toarray()
-            
-            # Apply the aggregation function and assign to the result
-            result[combination] = agg_func(dense_data, axis=0)
-
-    
-    return result, category_orders
     
 
 def match_categorical_order(source, target):
@@ -258,6 +195,29 @@ def ndarray_top_n_indices(arr, n, axis,descending=True):
     np.put_along_axis(result, indices_shape, top_n_indices, axis=axis)
     
     return result
+
+def double_triu_mat(cor_matrix_upper, cor_matrix_lower, diagonal_vector=None):
+    """Function to plot one triangular matrix in the upper, another on the lower and a normalized diagonal"""
+    # Ensure the input matrices and vector are of compatible sizes
+    if cor_matrix_upper.shape != cor_matrix_lower.shape:
+        raise ValueError("Matrices and vector sizes are not compatible.")
+    
+    size = cor_matrix_upper.shape[0]
+    dtriu_matrix = np.zeros((size, size))
+    
+    # Fill the upper triangle of the matrix 
+    dtriu_matrix[np.triu_indices(size, k=1)] = cor_matrix_upper[np.triu_indices(size, k=1)]
+    
+    # Fill the lower triangle of the matrix
+    dtriu_matrix[np.tril_indices(size, k=-1)] = cor_matrix_lower[np.tril_indices(size, k=-1)]
+    
+    # Scale the diagonal vector to match correlation scale
+    if diagonal_vector is not None:
+        scaled_diagonal = np.interp(diagonal_vector, (diagonal_vector.min(), diagonal_vector.max()), (-1, 1))
+    else:
+        scaled_diagonal=np.nan
+    np.fill_diagonal(dtriu_matrix, scaled_diagonal)
+    return(dtriu_matrix)
 
 def plot_genes_by_category(ad, category_column_names, gene_indices):
     """
