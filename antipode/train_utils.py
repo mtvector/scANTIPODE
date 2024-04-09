@@ -15,14 +15,6 @@ import math
 from . import model_functions
 from .model_functions import *
 
-try:
-    from IPython.display import Audio, display
-except:
-    print("no ipython, that's okay tho")
-
-def allDone():
-    display(Audio(url='https://notification-sounds.com/soundsfiles/Meditation-bell-sound.mp3', autoplay=True))
-
 def make_field(name,loc):
     if loc[0] == 'obsm':
         field=scvi.data.fields.ObsmField
