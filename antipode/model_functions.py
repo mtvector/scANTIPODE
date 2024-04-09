@@ -58,28 +58,34 @@ def calculate_layered_tree_means(X, level_assignments):
     """
     Calculates and adjusts means for clusters at each level according to the hierarchical structure,
     dynamically handling any number of layers, make sure layer size L+1 > L.
-    :param level_assignments: A list of arrays, where each array gives the cluster assignment at each level.
+    :param level_assignments: A list of arrays, where each array gives the cluster's assignment at each level. Root should be array of zeros, leaves should be range(X.shape[0]).
     :return: A dictionary containing the adjusted means for each level.
     """
     means = {}
     adjusted_means = {}
-
-    # Calculate initial means for each level
+    cumulative_adjustments = np.zeros_like(X[0])
+    
     for level, assignments in enumerate(level_assignments, start=1):
         unique_clusters = np.unique(assignments)
-        means[level] = {cluster: X[assignments.flatten() == cluster].mean(axis=0) for cluster in unique_clusters}
-
-    # Adjust means for each level
-    for level in range(1, len(level_assignments) + 1):
-        adjusted_means[level] = {}
-        for cluster_id, cluster_mean in means[level].items():
-            adjusted_mean = np.copy(cluster_mean)
-            # Subtract the means of all ancestor levels
-            for ancestor_level in range(1, level):
-                # Find the closest ancestor cluster for each cluster
-                ancestor_cluster = level_assignments[ancestor_level - 1][np.argwhere(level_assignments[level-1] == cluster_id)[0][0]]
-                adjusted_mean -= means[ancestor_level][ancestor_cluster[0]]
-            adjusted_means[level][cluster_id] = adjusted_mean
+        level_mean_adjustments = np.zeros_like(X[0])
+        
+        # Calculate the initial means for each cluster at the current level
+        means[level] = {}
+        for cluster in sorted(unique_clusters):
+            cluster_mean = X[assignments.flatten() == cluster].mean(axis=0)
+            means[level][cluster] = cluster_mean
+            
+            # Apply adjustments from previous levels
+            adjusted_cluster_mean = cluster_mean - cumulative_adjustments
+            adjusted_means.setdefault(level, {})[cluster] = adjusted_cluster_mean
+            
+            # Accumulate adjustments for the current level
+            level_mean_adjustments += adjusted_cluster_mean
+        
+        # Update cumulative adjustments for the next level
+        num_clusters = len(unique_clusters)
+        if num_clusters > 0:  # Avoid division by zero
+            cumulative_adjustments += level_mean_adjustments / num_clusters
 
     return adjusted_means
 
