@@ -241,10 +241,13 @@ class AntipodeTrainingMixin:
     def allDone(self):
         print("Finished training!")
         self.to('cpu')
-        import IPython
-        from IPython.display import Audio, display
-        IPython.display.clear_output()#Make compatible with jupyter nbconvert
-        display(Audio(url='https://notification-sounds.com/soundsfiles/Meditation-bell-sound.mp3', autoplay=True))
+        try:
+            import IPython
+            from IPython.display import Audio, display
+            IPython.display.clear_output()#Make compatible with jupyter nbconvert
+            display(Audio(url='https://notification-sounds.com/soundsfiles/Meditation-bell-sound.mp3', autoplay=True))
+        except:
+            pass
     
     def clear_cuda(self):
         '''Throw the kitchen sink at clearing the cuda cache for jupyter notebooks. 

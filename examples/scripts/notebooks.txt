@@ -1,0 +1,8 @@
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_RunSiletti.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/Matthew/code/scANTIPODE/examples/RunRetina-SCVIsupervise.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_RunRetinaNoPsi.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_RunRetinaAllNoPsi.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder-Relu.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder-NoPsiNoQ.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/scripts/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder-Tighter.ipynb
