@@ -1,6 +1,10 @@
 <h1 style="text-align: center;"> scANTIPODE</h1>
 
-![antipode logo!](assets/antipode_logo_alternate.png)
+<picture>
+  <img alt="antipode logo!" src="assets/antipode_logo_alternate.png">
+</picture>
+
+
 
 **S**ingle **C**ell **A**ncestral **N**ode **T**axonomy **I**nference by **P**arcellation **O**f **D**ifferential **E**xpression. The model is an extension of the SCVI paradigm--a structured generative, variational inference model developed for the simultaneous analysis (DE) and categorization (taxonomy generation) of cell types across evolution (or now any covariate) using single-cell RNA-seq data. It was originally developed from a simplified model of scANVI and is built on the pytorch-based PPL [pyro](https://pyro.ai/).
 
