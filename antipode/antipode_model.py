@@ -263,7 +263,7 @@ class AntipodeTrainingMixin:
             traceback.clear_frames(exc_traceback)
 
 class AntipodeSaveLoadMixin:
-    '''Directly taken and modified from scvi-tools base_model'''
+    '''Directly taken and modified from scvi-tools base_model and auxiliary functions'''
     def _get_user_attributes(self):
         """Returns all the self attributes defined in a model class, e.g., `self.is_trained_`."""
         attributes = inspect.getmembers(self, lambda a: not (inspect.isroutine(a)))
@@ -492,7 +492,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     layer (str): The specific layer of the AnnData object to be analyzed.
     level_sizes (list of int): Defines the hierarchical model structure (corresponding to a layered tree) by specifying the size of each level. Make sure each layer gets progressively larger and ideally start with a single root. Defaults to [1, 10, 100].
     bi_depth (int): Tree depth (from root) for batch identity effect correction. Defaults to 2. Should be less than length of level_sizes
-    num_latent (int): The number of latent dimensions to model. Defaults to 50. [DANGER]
+    psi_levels (list of bool): Whether or not to allow a psi at each level of the layered tree. Should be length 1 (all levels) or len(level_sizes)
+    
+    num_latent (int): The number of latent dimensions to model. Defaults to 50.
     num_batch_embed (int): Number of embedding dimensions for batch effects. Defaults to 10. 
     scale_factor (float, optional): Factor for scaling the data normalization. Inferred from data if None. [DANGER]
     prior_scale (float): Scale for the Laplace prior distributions. Defaults to 100. [DANGER]
@@ -505,13 +507,15 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     theta_prior (float): Initial value for the inverse dispersion of the negative binomial. Defaults to 50. [DANGER]
     scale_init_val (float): Initial value for scaling parameters. Defaults to 0.01. [DANGER]
     classifier_hidden, encoder_hidden, batch_embedder_hidden (list of int): Sizes of hidden layers for the classifier, encoder and batch embedding networks, respectively.
+    sampler_category (string): Obs categorical column which will be used with the dataloader to sample each category with equal probability. (suggested use is the discov category)
     """
 
     def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1,10,100],
                  num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,
-                 use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[1.],
+                 use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[True],
                  num_batch_embed=10,theta_prior=50.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
-                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],sampler_category=None):
+                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],
+                 sampler_category=None):
 
         pyro.clear_param_store()
         self.init_args = dict(locals())
@@ -545,7 +549,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.bi_depth = sum(self.level_sizes[:self.bi_depth])
         self.dist_normalize = dist_normalize
         self.sampler_category = sampler_category
-        self.psi_levels = psi_levels
+        self.psi_levels = [float(x) for x in psi_levels]
 
         self.dcd_prior = torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
                 
@@ -605,7 +609,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     out_dim=self.num_batch_embed)
         
         self.epsilon = 0.006
-        #Initialize model in approximation mode
+        #Initialize model not in fuzzy mode
         self.approx=False
         self.prior_scale=prior_scale
         self.args=inspect.getfullargspec(self.model).args[1:]#skip self

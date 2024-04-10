@@ -16,4 +16,4 @@ conda activate antipode
 # Read the notebook path for the current array task
 NOTEBOOK=$(sed -n "${SLURM_ARRAY_TASK_ID}p" ~/Matthew/code/scANTIPODE/examples/scripts/phase_3s.txt)
 
-python ~/Matthew/code/scANTIPODE/examples/scripts/run_phase_3.py /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/data/taxtest/HvQvM/HvQvMall_cere_clean_nodoublets.h5ad $NOTEBOOK
+python ~/Matthew/code/scANTIPODE/examples/scripts/run_phase_3.py /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/data/taxtest/HvQvM/HvQvMall_cere_clean_nodoublets.h5ad $NOTEBOOK batch_name species spliced

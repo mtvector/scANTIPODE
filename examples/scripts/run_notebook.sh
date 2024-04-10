@@ -12,10 +12,10 @@ source ~/.bashrc
 
 !nvidia-smi
 
-conda activate pyro
+conda activate antipode
 
 # Read the notebook path for the current array task
-NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_Start2RevampSaveLoadPAL-PsiNormal-SmallerEncoder-FixLinit.ipynb
+NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_RunSiletti.ipynb
 
 # Command to run jupyter nbconvert
 jupyter nbconvert --ExecutePreprocessor.allow_errors=True --to html --execute "${NOTEBOOK}" --output ~/Matthew/code/scANTIPODE/examples/outputs/"executed_$(basename "${NOTEBOOK}")" 
