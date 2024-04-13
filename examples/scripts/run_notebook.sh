@@ -5,7 +5,7 @@
 #SBATCH --time 72:00:00
 #SBATCH --partition celltypes
 #SBATCH --gres=gpu:1 --constraint="a100|v100"#
-#SBATCH --mem 128gb
+#SBATCH --mem 256gb
 #SBATCH --ntasks 1
 
 source ~/.bashrc
@@ -15,7 +15,7 @@ source ~/.bashrc
 conda activate antipode
 
 # Read the notebook path for the current array task
-NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_RunSiletti.ipynb
+NOTEBOOK=/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.1_RunJorstadAllNoPsi.ipynb
 
 # Command to run jupyter nbconvert
 jupyter nbconvert --ExecutePreprocessor.allow_errors=True --to html --execute "${NOTEBOOK}" --output ~/Matthew/code/scANTIPODE/examples/outputs/"executed_$(basename "${NOTEBOOK}")" 
