@@ -9,6 +9,10 @@ import tqdm
 import scanpy as sc
 import sklearn
 from . import model_functions
+try:
+    import gseapy
+except:
+    print("GSEApy not found. Can't get module enrichmenes")
 
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'valid') / w
@@ -301,3 +305,55 @@ def plot_top_genes_by_category(ad, category_column_names, top_n, reference_matri
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
         plt.tight_layout()
         plt.show()
+
+def plot_gene_mean_ecdf(adata,discov_key):
+    adata.obs[discov_key]=adata.obs[discov_key].astype('category')
+    outs=antipode.model_functions.group_aggr_anndata(adata,[discov_key])
+    seaborn.ecdfplot(pd.DataFrame(outs[0],index=outs[1][discov_key]).T)
+
+def get_prerank_custom_list(input_series,gene_list,**kwargs):
+    """
+    Run GSEApy prerank on a custom gene list.
+
+    Parameters:
+    input_series (pd.Series): A pandas Series where the index is gene names and the values are numerical.
+    gene_list (list): A list of HGNC gene symbols.
+
+    Returns:
+    Pandas dataframe of res2d
+    """
+
+    df = input_series.reset_index()
+    df.columns = ['gene_name', 'rank_metric']
+    
+    pre_res = gseapy.prerank(rnk=df,
+                         gene_sets={ 'custom_set': gene_list }, # Assuming a single custom gene set for simplicity
+                         processes=1,
+                         outdir=None,
+                         seed=13,
+                         **kwargs)
+    return(pre_res.res2d)
+
+
+def get_prerank_from_mat(mat,gene_list,**kwargs):
+    """
+    Run GSEApy prerank on a custom gene list.
+
+    Parameters:
+    mat (pd.DataFrame): A pandas Dataframe where the index is gene names and the values are numerical.
+    gene_list (list): A list of HGNC gene symbols.
+
+    Returns:
+    Pandas dataframe of res2ds concatenated
+    """
+    import warnings
+    warnings.filterwarnings(action='once')
+    warnings.catch_warnings(action="ignore")
+    results={}
+    for x in tqdm.tqdm(mat.columns):
+        results[x]=get_prerank_custom_list(mat[x],gene_list,**kwargs)
+    enrichdf=pd.concat(results.values())
+    enrichdf.index=results.keys()
+    return(enrichdf)
+
+
