@@ -136,9 +136,9 @@ def fest(tensors,unsqueeze=0,scalar=1.,epsilon=1e-10):
     '''
     einsum_str = ','.join(f'...z{chr(65 + i)}' for i, _ in enumerate(tensors))
     einsum_str += '->...' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
-    tensors=[x+epsilon for x in tensors]
     out=torch.einsum(einsum_str, *[x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
-    return [poutine.scale(scale=scalar*out)]
+    #print(out.shape)
+    return [poutine.scale(scale=scalar*out+epsilon)]
 
 class ZLEncoder(nn.Module):
     '''
