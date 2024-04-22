@@ -10,3 +10,5 @@
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Tighter-Longer-ResetDC-Candidate.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer-ResetDC-Candidate.ipynb
 
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer-ResetDC-TaxonScaling-Tighter-Candidate.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer-ResetDC-TaxonScaling-Candidate.ipynb
