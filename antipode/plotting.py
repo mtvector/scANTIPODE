@@ -12,7 +12,7 @@ from . import model_functions
 try:
     import gseapy
 except:
-    print("GSEApy not found. Can't get module enrichmenes")
+    print("GSEApy not found. Can't get module enrichments")
 
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'valid') / w
@@ -311,7 +311,7 @@ def plot_gene_mean_ecdf(adata,discov_key):
     outs=antipode.model_functions.group_aggr_anndata(adata,[discov_key])
     seaborn.ecdfplot(pd.DataFrame(outs[0],index=outs[1][discov_key]).T)
 
-def get_prerank_custom_list(input_series,gene_list,**kwargs):
+def get_prerank_custom_list(input_series,gene_list_dict,**kwargs):
     """
     Run GSEApy prerank on a custom gene list.
 
@@ -325,9 +325,8 @@ def get_prerank_custom_list(input_series,gene_list,**kwargs):
 
     df = input_series.reset_index()
     df.columns = ['gene_name', 'rank_metric']
-    
     pre_res = gseapy.prerank(rnk=df,
-                         gene_sets={ 'custom_set': gene_list }, # Assuming a single custom gene set for simplicity
+                         gene_sets=gene_list_dict, 
                          processes=1,
                          outdir=None,
                          seed=13,
@@ -335,7 +334,7 @@ def get_prerank_custom_list(input_series,gene_list,**kwargs):
     return(pre_res.res2d)
 
 
-def get_prerank_from_mat(mat,gene_list,**kwargs):
+def get_prerank_from_mat(mat,gene_list_dict,**kwargs):
     """
     Run GSEApy prerank on a custom gene list.
 
@@ -347,13 +346,11 @@ def get_prerank_from_mat(mat,gene_list,**kwargs):
     Pandas dataframe of res2ds concatenated
     """
     import warnings
-    warnings.filterwarnings(action='once')
-    warnings.catch_warnings(action="ignore")
     results={}
     for x in tqdm.tqdm(mat.columns):
-        results[x]=get_prerank_custom_list(mat[x],gene_list,**kwargs)
+        warnings.filterwarnings(action='ignore')
+        warnings.catch_warnings(action="ignore")
+        results[x]=get_prerank_custom_list(mat[x],gene_list_dict,**kwargs)
+        results[x]['input_column']=x
     enrichdf=pd.concat(results.values())
-    enrichdf.index=results.keys()
     return(enrichdf)
-
-

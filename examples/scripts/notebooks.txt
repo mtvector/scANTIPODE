@@ -1,3 +1,15 @@
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-Longer.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-Longer-ResetDC.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-TaxonScaling-Longer.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer-ResetDC.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-TaxonScaling-Tighter-Longer.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Tighter-Longer.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Tighter-Longer-ResetDC.ipynb
+
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Tighter-Longer-ResetDC-Candidate.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Relu-NoInterceptOnApprox-Longer-ResetDC-Candidate.ipynb
+
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/triple-dev-wb/analysis/IntegrationMDEs.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.2_Relu-scalefest.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/triple-dev-wb/analysis/IntegrationMDEs.ipynb
