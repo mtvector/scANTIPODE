@@ -170,6 +170,8 @@ class AntipodeTrainingMixin:
         pyro.get_param_store().__setitem__('discov_di',new_locs.new_zeros(pyro.param('discov_di').shape))
         pyro.get_param_store().__setitem__('batch_di',new_locs.new_zeros(pyro.param('batch_di').shape))
         pyro.get_param_store().__setitem__('cluster_intercept',new_locs.new_zeros(pyro.param('cluster_intercept').shape))
+        pyro.get_param_store().__setitem__('discov_dc',new_locs.new_zeros(pyro.param('discov_dc').shape))
+
     
     def common_training_loop(self, dataloader, max_steps, scheduler, svi, print_every, device, steps=0):
         self.losses = []
@@ -475,6 +477,7 @@ class AntipodeSaveLoadMixin:
         model = cls._initialize_model(adata, attr_dict,os.path.join(dir_path,prefix+'antipode.paramstore'),device=device)
         model.load_state_dict(model_state_dict)
         model.eval()
+        #,os.path.join(dir_path,'antipode.paramstore')
         #model._validate_anndata(adata)
         return model
 
@@ -607,6 +610,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.be_nn=SimpleFFNN(in_dim=self.num_batch,hidden_dims=batch_embedder_hidden,
                     out_dim=self.num_batch_embed)
         
+        self.epsilon = 0.006
         #Initialize model not in fuzzy mode
         self.approx=False
         self.prior_scale=prior_scale
@@ -640,18 +644,18 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         # Register various nn.Modules (i.e. the decoder/encoder networks) with Pyro
         pyro.module("antipode", self)
-        bs=s.shape[0]
+
         if not self.design_matrix:
-            batch=index_to_onehot(batch_ind,[bs,self.num_batch]).to(s.device)
-            discov=index_to_onehot(discov_ind,[bs,self.num_discov]).to(s.device)
+            batch=index_to_onehot(batch_ind,[s.shape[0],self.num_batch]).to(s.device)
+            discov=index_to_onehot(discov_ind,[s.shape[0],self.num_discov]).to(s.device)
             batch_ind=batch_ind.squeeze()
             discov_ind=discov_ind.squeeze()
         else:
             batch=batch_ind
             discov=discov_ind
         
-        minibatch_plate=pyro.plate("minibatch_plate", bs,dim=-1)
-        minibatch_plate2=pyro.plate("minibatch_plate2", bs,dim=-2)
+        minibatch_plate=pyro.plate("minibatch_plate", s.shape[0],dim=-1)
+        minibatch_plate2=pyro.plate("minibatch_plate2", s.shape[0],dim=-2)
         l = s.sum(1).unsqueeze(-1)
         
         # Scale all sample statements for numerical stability
@@ -675,7 +679,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     taxon_probs = pyro.sample("taxon_probs", dist.Beta(beta_prior_a,s.new_ones(self.num_labels),validate_args=True).to_event(1))
                     taxon = pyro.sample('taxon',dist.RelaxedBernoulli(temperature=0.1*s.new_ones(1),probs=taxon_probs).to_event(1))
                 else:
-                    taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(bs,self.level_sizes[-1]),validate_args=True))
+                    taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(s.shape[0],self.level_sizes[-1]),validate_args=True))
                     if sum(taxon.shape) > 1:#Supervised?
                         if taxon.shape[-1]==self.num_labels:#Totally supervised?
                             pass
@@ -690,27 +694,27 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     taxon_probs=self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s)
                     taxon_probs=torch.cat(taxon_probs,-1)
                    
-            locs=self.zl.model_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            scales=self.zs.model_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            locs_dynam=self.zld.model_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            discov_dm=self.dm.model_sample(s,scale=fest([discov,taxon],-1,epsilon=1e-5))
-            discov_di=self.di.model_sample(s,scale=fest([discov,taxon],-1,epsilon=1e-5))
-            batch_dm=self.bm.model_sample(s,scale=fest([batch,taxon],-1,epsilon=1e-5))
+            locs=self.zl.model_sample(s,scale=fest([taxon],-1))
+            scales=self.zs.model_sample(s,scale=fest([taxon],-1))
+            locs_dynam=self.zld.model_sample(s,scale=fest([taxon],-1))
+            discov_dm=self.dm.model_sample(s,scale=fest([discov,taxon],-1))
+            discov_di=self.di.model_sample(s,scale=fest([discov,taxon],-1))
+            batch_dm=self.bm.model_sample(s,scale=fest([batch,taxon],-1))
             
-            bei=self.bei.model_sample(s,scale=fest([batch_embed.abs(),taxon[...,:self.bi_depth]],-1,epsilon=1e-5))
-            cluster_intercept=self.ci.model_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
+            bei=self.bei.model_sample(s,scale=fest([batch_embed.abs(),taxon[...,:self.bi_depth]],-1))
+            cluster_intercept=self.ci.model_sample(s,scale=fest([taxon],-1))
             
             with minibatch_plate:
                 bi=torch.einsum('...bi,...ijk->...bjk',batch_embed,bei)
                 bi=torch.einsum('...bj,...bjk->...bk',taxon[...,:self.bi_depth],bi)
-                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(bs,len(self.level_sizes)),self.prior_scale*s.new_ones(bs,len(self.level_sizes))).to_event(1)))
-                #psi = centered_sigmoid(pyro.sample('psi',dist.Logistic(s.new_zeros(bs,len(self.level_sizes)),s.new_ones(bs,len(self.level_sizes))).to_event(1)))
+                psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],len(self.level_sizes)),self.prior_scale*s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
+                #psi = centered_sigmoid(pyro.sample('psi',dist.Logistic(s.new_zeros(s.shape[0],len(self.level_sizes)),s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
                 psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
                 psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
-                q = torch.sigmoid(pyro.sample('q',dist.Logistic(s.new_zeros(bs,1),s.new_ones(bs,1)).to_event(1))) if self.use_q_score else 1.0
+                q = torch.sigmoid(pyro.sample('q',dist.Logistic(s.new_zeros(s.shape[0],1),s.new_ones(s.shape[0],1)).to_event(1))) if self.use_q_score else 1.0
                 this_locs=oh_index(locs,taxon)
                 this_scales=oh_index(scales,taxon)
-                z=pyro.sample('z_loc',dist.Laplace(this_locs,0.5*self.prior_scale*s.new_ones(bs,self.num_latent),validate_args=True).to_event(1))
+                z=pyro.sample('z_loc',dist.Laplace(this_locs,0.5*self.prior_scale*s.new_ones(s.shape[0],self.num_latent),validate_args=True).to_event(1))
                 z_dist=dist.Normal(this_locs,this_scales+self.epsilon,validate_args=True).to_event(1)
                 if sum(Z_obs.shape) <=1: 
                      z=pyro.sample('z', z_dist) 
@@ -724,38 +728,38 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             
             z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)                
-            z_decoder_weight=self.zdw.model_sample(s,scale=fest([z.abs()],-1,epsilon=1e-5))
-            discov_dc=self.dc.model_sample(s,scale=fest([discov,z.abs()],-1,epsilon=1e-5))
+            z_decoder_weight=self.zdw.model_sample(s,scale=fest([z.abs()],-1))
+            discov_dc=self.dc.model_sample(s,scale=fest([discov,z.abs()],-1))
             cur_discov_di = oh_index1(discov_di, discov_ind) if self.design_matrix else discov_di[discov_ind]
             cur_discov_dc = oh_index1(discov_dc, discov_ind) if self.design_matrix else discov_dc[discov_ind]
             cur_discov_di=oh_index2(cur_discov_di,taxon)
-            cur_cluster_intercept=oh_index(cluster_intercept,taxon)
+            cur_cluster_intercept=oh_index(cluster_intercept,taxon) if not self.approx else 0.
             
             mu=torch.einsum('...bi,...bij->...bj',z,z_decoder_weight+cur_discov_dc)#+bc
             spliced_mu=mu+cur_dcd+cur_discov_di+cur_cluster_intercept+bi+((1-q)*quality_genes)
             norm_spliced_mu=spliced_mu*discov_mul[discov_ind]
             spliced_out=softmax(norm_spliced_mu,dim=-1)
-            log_mu = (l * spliced_out + self.epsilon).log()
+            log_mu = (l * spliced_out + 1e-6).log()
             
             with self.var_plate,minibatch_plate2:
-                s_dist = dist.NegativeBinomial(total_count=(s_theta*q)+self.epsilon,logits=log_mu-s_theta.log(),validate_args=True)
+                s_dist = dist.NegativeBinomial(total_count=(s_theta*q)+0.1,logits=log_mu-s_theta.log(),validate_args=True)
                 s_out=pyro.sample("s", s_dist, obs=s.int())
 
     
     # The guide specifies the variational distribution
     def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         pyro.module("antipode", self)
-        bs=s.shape[0]
+        
         if not self.design_matrix:
-            batch=index_to_onehot(batch_ind,[bs,self.num_batch]).to(s.device)
-            discov=index_to_onehot(discov_ind,[bs,self.num_discov]).to(s.device)
+            batch=index_to_onehot(batch_ind,[s.shape[0],self.num_batch]).to(s.device)
+            discov=index_to_onehot(discov_ind,[s.shape[0],self.num_discov]).to(s.device)
             batch_ind=batch_ind.squeeze()
             discov_ind=discov_ind.squeeze()
         else:
             batch=batch_ind
             discov=discov_ind
         
-        minibatch_plate=pyro.plate("minibatch_plate", bs)
+        minibatch_plate=pyro.plate("minibatch_plate", s.shape[0])
         
         with poutine.scale(scale=self.scale_factor):
             level_edges=self.tree_edges.guide_sample(s,approx=self.approx) 
@@ -798,18 +802,19 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     taxon_probs=torch.cat(taxon_probs,-1)
 
             quality_genes=self.qg.guide_sample(s) if self.use_q_score else 0.
-            locs=self.zl.guide_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            scales=self.zs.guide_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            locs_dynam=self.zld.guide_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            discov_dm=self.dm.guide_sample(s,scale=fest([discov,taxon],-1,epsilon=1e-5))
-            batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon],-1,epsilon=1e-5))
-            discov_di=self.di.guide_sample(s,scale=fest([discov,taxon],-1,epsilon=1e-5))
-            cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon],-1,epsilon=1e-5))
-            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon[...,:self.bi_depth]],-1,epsilon=1e-5))
+            locs=self.zl.guide_sample(s,scale=fest([taxon],-1))
+            scales=self.zs.guide_sample(s,scale=fest([taxon],-1))
+            locs_dynam=self.zld.guide_sample(s,scale=fest([taxon],-1))
+            discov_dm=self.dm.guide_sample(s,scale=fest([discov,taxon],-1))
+            batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon],-1))
+            discov_di=self.di.guide_sample(s,scale=fest([discov,taxon],-1))
+            cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon],-1))
+            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon[...,:self.bi_depth]],-1))#maybe should be abs sum bei
+            #For scaling
             if self.design_matrix:
                 z=z+oh_index2(oh_index1(discov_dm,discov_ind),taxon) + oh_index2(oh_index1(batch_dm,batch_ind),taxon)+(oh_index(locs_dynam,taxon*psi))
             else:
                 z=z+oh_index2(discov_dm[discov_ind],taxon) + oh_index2(batch_dm[batch_ind],taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)
-            z_decoder_weight=self.zdw.guide_sample(s,scale=fest([z.abs()],-1,epsilon=1e-5))
-            discov_dc=self.dc.guide_sample(s,scale=fest([discov,z.abs()],-1,epsilon=1e-5))
+            z_decoder_weight=self.zdw.guide_sample(s,scale=fest([z.abs()],-1))
+            discov_dc=self.dc.guide_sample(s,scale=fest([discov,z.abs()],-1))
