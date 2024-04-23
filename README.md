@@ -14,11 +14,11 @@
 
 The complete procedure runs in 3 phases (but can also run fully supervised using only phase 2):
 
-1. *The Fuzzy Phase* Cells may belong to multiple types sampled from a bernoulli distribution, learns an integrated latent space with covariate effects, but is less straightforward to interpret.
+1. **The Fuzzy Phase:** Cells may belong to multiple types sampled from a bernoulli distribution, learns an integrated latent space with covariate effects, but is less straightforward to interpret.
 
-2. *The Supervised Phase* Discrete clustering is initialized from a supervised initialization (or defaults to a de novo k-means clustering in the latent space). Can take a supervised clustering and/or latent space for cells.
+2. **The Supervised Phase:** Discrete clustering is initialized from a supervised initialization (or defaults to a de novo k-means clustering in the latent space). Can take a supervised clustering and/or latent space for cells.
 
-3. *The Free Phase* All parameters are released for unconstrained learning.
+3. **The Free Phase:** All parameters are released for unconstrained learning.
 
 
 You can read about the generative model [here](https://www.overleaf.com/read/nmcmcjtvmfcb#acf7a4). You can look at example runs [here](examples/outputs/).
