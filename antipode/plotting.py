@@ -91,21 +91,21 @@ def plot_d_hists(antipode_model):
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
     param_store=antipode_model.adata_manager.adata.uns['param_store']
     
-    seaborn.histplot(param_store['locs'].flatten(),color="lightgrey",label='ancestral',bins=50,stat='proportion')
+    seaborn.histplot(param_store['locs'].flatten(),color="lightgrey",label='shared',bins=50,stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_dm'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
     plt.legend()
     plt.title('DM')
     plt.show()
     
-    seaborn.histplot(param_store['cluster_intercept'].flatten(),color='lightgrey',bins=50,label='ancestral',stat='proportion')
+    seaborn.histplot(param_store['cluster_intercept'].flatten(),color='lightgrey',bins=50,label='shared',stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_di'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
     plt.legend()
     plt.title('DI')
     plt.show()
     
-    seaborn.histplot(param_store['z_decoder_weight'].flatten(),color='lightgrey',bins=50,label='ancestral',stat='proportion')
+    seaborn.histplot(param_store['z_decoder_weight'].flatten(),color='lightgrey',bins=50,label='shared',stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_dc'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
     plt.legend()
@@ -123,7 +123,7 @@ def plot_gmm_heatmaps(antipode_model):
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
     param_store=antipode_model.adata_manager.adata.uns['param_store']
 
-    seaborn.clustermap(antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy(),metric='correlation',cmap='coolwarm')
+    seaborn.clustermap(antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy(),cmap='coolwarm')
     plt.title('locs')
     plt.show()
 

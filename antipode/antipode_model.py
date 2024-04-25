@@ -494,7 +494,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     layer (str): The specific layer of the AnnData object to be analyzed.
     level_sizes (list of int): Defines the hierarchical model structure (corresponding to a layered tree) by specifying the size of each level. Make sure each layer gets progressively larger and ideally start with a single root. Defaults to [1, 10, 100].
     bi_depth (int): Tree depth (from root) for batch identity effect correction. Defaults to 2. Should be less than length of level_sizes
-    psi_levels (list of bool): Whether or not to allow a psi at each level of the layered tree. Should be length 1 (all levels) or len(level_sizes)
+    psi_levels (list of bool): Whether or not to allow a psi at each level of the layered tree. Should be 1. (all levels) or a list of len(level_sizes)
     
     num_latent (int): The number of latent dimensions to model. Defaults to 50.
     num_batch_embed (int): Number of embedding dimensions for batch effects. Defaults to 10. 
@@ -507,17 +507,16 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     z_transform (pytorch function): Function to be applied to latent space (Z) e.g. centered_sigmoid, sigmoid. This will mess up DE Parameter scaling.
     loc_as_param, zdw_as_param, intercept_as_param (bool): Flags for using location, Z decoder weight, and intercept as parameters instead (maximum likelihood inference instead of Laplace MAP), respectively. All default to False.
     theta_prior (float): Initial value for the inverse dispersion of the negative binomial. Defaults to 50. [DANGER]
-    scale_init_val (float): Initial value for scaling parameters. Defaults to 0.01. [DANGER]
+    scale_init_val (float): Initial value for scaling parameters in phase 1. Defaults to 0.01. [DANGER]
     classifier_hidden, encoder_hidden, batch_embedder_hidden (list of int): Sizes of hidden layers for the classifier, encoder and batch embedding networks, respectively.
     sampler_category (string): Obs categorical column which will be used with the dataloader to sample each category with equal probability. (suggested use is the discov category)
     """
 
     def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1,10,100],
-                 num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,
-                 use_psi=True,loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[True],
+                 num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,sampler_category=None,
+                 loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[True],
                  num_batch_embed=10,theta_prior=50.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
-                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],
-                 sampler_category=None):
+                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500]):
 
         pyro.clear_param_store()
         self.init_args = dict(locals())
@@ -640,7 +639,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
 
     def set_freeze_encoder(self,b: bool):
         self.freeze_encoder=b
-        
+
+    # the generative model
     def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         # Register various nn.Modules (i.e. the decoder/encoder networks) with Pyro
         pyro.module("antipode", self)
@@ -708,7 +708,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                 bi=torch.einsum('...bi,...ijk->...bjk',batch_embed,bei)
                 bi=torch.einsum('...bj,...bjk->...bk',taxon[...,:self.bi_depth],bi)
                 psi = centered_sigmoid(pyro.sample('psi',dist.Laplace(s.new_zeros(s.shape[0],len(self.level_sizes)),self.prior_scale*s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
-                #psi = centered_sigmoid(pyro.sample('psi',dist.Logistic(s.new_zeros(s.shape[0],len(self.level_sizes)),s.new_ones(s.shape[0],len(self.level_sizes))).to_event(1)))
                 psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
                 psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
                 q = torch.sigmoid(pyro.sample('q',dist.Logistic(s.new_zeros(s.shape[0],1),s.new_ones(s.shape[0],1)).to_event(1))) if self.use_q_score else 1.0
@@ -748,7 +747,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                 s_out=pyro.sample("s", s_dist, obs=s.int())
 
     
-    # The guide specifies the variational distribution
+    # the variational distribution
     def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         pyro.module("antipode", self)
         
@@ -782,7 +781,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                 pyro.sample('z_loc',dist.Delta(z_loc).to_event(1))
                 z=self.z_transform(z)
                 taxon_logits,psi_loc,psi_scale=self.classifier(z)
-                #psi=centered_sigmoid(pyro.sample('psi_loc',dist.Delta(psi_loc).to_event(1)))
                 psi=centered_sigmoid(pyro.sample('psi',dist.Normal(psi_loc,psi_scale+self.epsilon).to_event(1)))
                 psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
                 psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
