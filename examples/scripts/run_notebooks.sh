@@ -4,7 +4,7 @@
 #SBATCH --error /home/matthew.schmitz/log/nbconvert_%A_%a.err
 #SBATCH --time 33:00:00
 #SBATCH --partition celltypes
-#SBATCH --array=16-19 # Create an array job for each line in notebooks.txt
+#SBATCH --array=17-17 # Create an array job for each line in notebooks.txt
 #SBATCH --gres=gpu:1 --constraint="a100|v100"#
 #SBATCH --mem 127gb
 #SBATCH --ntasks 1

@@ -16,7 +16,7 @@
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_RunRetinaAllNoPsi.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_V1All.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_RunRetinaNoPsi.ipynb
-/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Siletti.ipynb
-
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_Siletti.ipynb
+/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_V1.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_JorstadAll.ipynb
 /allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/code/scANTIPODE/examples/1.9.1.8.3_M1V1.ipynb
