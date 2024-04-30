@@ -303,6 +303,19 @@ def oh_index2(mat,ind):
     '''
     return(torch.einsum('...bij,...bi->...bj',mat,ind))
 
+def np_oh_index1(mat,ind):
+    '''
+    treat onehot as categorical index for 3d input
+    '''
+    return(np.einsum('...ijk,...bi->...bjk',mat,ind))
+
+def np_oh_index2(mat,ind):
+    '''
+    treat onehot as categorical index for 3d input
+    '''
+    return(np.einsum('...bij,...bi->...bj',mat,ind))
+
+
 def add_cats_uns(adata,column,uns_name=None):
     if uns_name is None:
         uns_name=column+'_cats'

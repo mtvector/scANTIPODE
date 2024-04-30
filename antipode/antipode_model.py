@@ -118,7 +118,7 @@ class AntipodeTrainingMixin:
         s2=ideal_val*s1/o1
         self.scale_factor=s2
 
-    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device=None,dimension_reduction='X_antipode'):
+    def prepare_phase_2(self,cluster='kmeans',prefix='',epochs = 5,device=None,dimension_reduction='X_antipode',reset_dc=True,naive_init=False):
         '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), 
         runs kmeans if cluster=kmeans, else uses the obs column provided by cluster. epochs=None skips pretraing of classifier
         To learn a latent space from scratch set dimension_reduction to None and use freeze_encoder=False'''
@@ -142,18 +142,25 @@ class AntipodeTrainingMixin:
             print('quick init')
             self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=4)
             self.cpu()
-
-        hierarchy=scipy.cluster.hierarchy.ward(kmeans_means)
-        level_assignments=[scipy.cluster.hierarchy.cut_tree(hierarchy,n_clusters=x) for x in self.level_sizes]
-        adj_means_dict=calculate_layered_tree_means(kmeans_means, level_assignments)
-        new_clusts=[adj_means_dict[k][j] for k in adj_means_dict.keys() for j in adj_means_dict[k].keys()]
-        new_locs=torch.tensor(new_clusts,device=device).float()
+            
+        if naive_init:
+            new_locs=torch.concatenate(
+                [pyro.param('locs').new_zeros(sum(self.level_sizes[:-1]),pyro.param('locs').shape[1]),
+                 torch.tensor(kmeans_means-kmeans_means.mean(0),device=pyro.param('locs').device).float()],
+                 axis=0).float()
+            new_locs[0,:]=torch.tensor(kmeans_means.mean(0)).float()
+        else:
+            hierarchy=scipy.cluster.hierarchy.ward(kmeans_means)
+            level_assignments=[scipy.cluster.hierarchy.cut_tree(hierarchy,n_clusters=x) for x in self.level_sizes]
+            adj_means_dict=calculate_layered_tree_means(kmeans_means, level_assignments)
+            new_clusts=[adj_means_dict[k][j] for k in adj_means_dict.keys() for j in adj_means_dict[k].keys()]
+            new_locs=torch.tensor(new_clusts,device=device).float()
         
         edge_matrices=create_edge_matrices(level_assignments)
         edge_matrices=[torch.tensor(x,device=device) for x in edge_matrices]
         for i in range(len(self.level_sizes)-1):
             #pyro.get_param_store().__setitem__('edges_'+str(i), pyro.param('edges_'+str(i)).detach()+edge_matrices[i].T)
-            pyro.get_param_store().__setitem__('edges_'+str(i), 1e-4*torch.randn(edge_matrices[i].T.shape,device=device).float()+edge_matrices[i].T.float())
+            pyro.get_param_store().__setitem__('edges_'+str(i), 1e-4 * torch.randn(edge_matrices[i].T.shape,device=device).float() + edge_matrices[i].T.float())
         
         self.adata_manager.adata.obs[cluster].astype(int)
         new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer=dimension_reduction,obsm=True)[0]
@@ -170,8 +177,8 @@ class AntipodeTrainingMixin:
         pyro.get_param_store().__setitem__('discov_di',new_locs.new_zeros(pyro.param('discov_di').shape))
         pyro.get_param_store().__setitem__('batch_di',new_locs.new_zeros(pyro.param('batch_di').shape))
         pyro.get_param_store().__setitem__('cluster_intercept',new_locs.new_zeros(pyro.param('cluster_intercept').shape))
-        pyro.get_param_store().__setitem__('discov_dc',new_locs.new_zeros(pyro.param('discov_dc').shape))
-
+        if reset_dc: #DC doesn't necessarily need to be reset, can explode challenging models
+            pyro.get_param_store().__setitem__('discov_dc',new_locs.new_zeros(pyro.param('discov_dc').shape))
     
     def common_training_loop(self, dataloader, max_steps, scheduler, svi, print_every, device, steps=0):
         self.losses = []
@@ -472,7 +479,6 @@ class AntipodeSaveLoadMixin:
         adata = new_adata if new_adata is not None else adata
 
         cls._validate_var_names(adata, var_names)
-        
         
         model = cls._initialize_model(adata, attr_dict,os.path.join(dir_path,prefix+'antipode.paramstore'),device=device)
         model.load_state_dict(model_state_dict)
