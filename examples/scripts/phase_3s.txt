@@ -1,2 +1,0 @@
-/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/models/1.9.1.8.3_Relu-NoInterceptApprox-Reset
-/allen/programs/celltypes/workgroups/rnaseqanalysis/EvoGen/Team/Matthew/models/1.9.1.8.3_Relu-NoInterceptApprox-Reset-Tighter

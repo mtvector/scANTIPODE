@@ -19,7 +19,6 @@ else:
     print("GPU is not available")
 
 import sys
-sys.path.append('/home/matthew.schmitz/Matthew/code/scANTIPODE/')
 import antipode
 from antipode.antipode_model import *
 import antipode.model_functions
@@ -34,7 +33,7 @@ import antipode.plotting
 from antipode.plotting import *
 
 
-max_steps=300000
+max_steps=100000
 batch_key=sys.argv[3]
 discov_key=sys.argv[4]
 layer_key=sys.argv[5]
