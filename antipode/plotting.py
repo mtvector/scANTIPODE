@@ -91,21 +91,23 @@ def plot_d_hists(antipode_model):
     colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
     param_store=antipode_model.adata_manager.adata.uns['param_store']
     
-    seaborn.histplot(param_store['locs'].flatten(),color="lightgrey",label='shared',bins=50,stat='proportion')
+    seaborn.histplot(param_store['locs'].flatten(),color="slategray",label='shared',bins=50,stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_dm'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
+    seaborn.histplot(param_store['batch_dm'].flatten(),color='lightgrey',bins=50,label='batch',stat='proportion')
     plt.legend()
     plt.title('DM')
     plt.show()
     
-    seaborn.histplot(param_store['cluster_intercept'].flatten(),color='lightgrey',bins=50,label='shared',stat='proportion')
+    seaborn.histplot(param_store['cluster_intercept'].flatten(),color='slategray',bins=50,label='shared',stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_di'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
+    seaborn.histplot(param_store['batch_di'].flatten(),color='lightgrey',bins=50,label='batch',stat='proportion')
     plt.legend()
     plt.title('DI')
     plt.show()
     
-    seaborn.histplot(param_store['z_decoder_weight'].flatten(),color='lightgrey',bins=50,label='shared',stat='proportion')
+    seaborn.histplot(param_store['z_decoder_weight'].flatten(),color='slategray',bins=50,label='shared',stat='proportion')
     for i in range(len(categories)):
         seaborn.histplot(param_store['discov_dc'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
     plt.legend()
@@ -354,3 +356,80 @@ def get_prerank_from_mat(mat,gene_list_dict,**kwargs):
         results[x]['input_column']=x
     enrichdf=pd.concat(results.values())
     return(enrichdf)
+
+def select_features_by_pca(A, N,n_components=20):
+    '''    
+    Get the top N loaded features across n_components using PCA. You should standardize your columns yourself (features).
+
+    Parameters:
+    A (np.matrix): A numpy matrix.
+    N (integer): Number of features to return.
+    n_components (integer): Number of components to compute for PCA
+
+    Returns:
+    Array of N indices
+    '''
+    # Standardize the data (features as columns)
+
+    pca = sklearn.decomposition.PCA(n_components=n_components)
+    S_ = pca.fit_transform(A)  # Reconstruct signals
+    A_ = np.abs(pca.components_.T)  # Get the mixing matrix
+
+    # Get the absolute weights and rank features within each component
+    component_ranks = np.argsort(-np.abs(A_), axis=0)
+
+    # Select N unique features by cycling through components
+    selected_features = set()
+    num_components = A_.shape[1]
+    idx = 0
+    while len(selected_features) < N:
+        component = idx % num_components  # Cycle through components
+        feature_candidates = component_ranks[:, component]
+        for feature in feature_candidates:
+            if feature not in selected_features:
+                selected_features.add(feature)
+                break
+        idx += 1
+        if idx > 1000:  # Safety break to avoid infinite loop
+            break
+
+    return list(selected_features)
+
+
+def select_features_by_ica(A, N,n_components=20):
+    '''    
+    Get the top N loaded features across n_components using ICA. You should standardize your columns yourself (features).
+
+    Parameters:
+    A (np.matrix): A numpy matrix.
+    N (integer): Number of features to return.
+    n_components (integer): Number of components to compute for ICA
+
+    Returns:
+    Array of N indices
+    '''
+    
+    # Apply ICA
+    ica = sklearn.decomposition.FastICA(n_components=n_components)
+    S_ = ica.fit_transform(A)  # Reconstruct signals
+    A_ = ica.mixing_  # Get the mixing matrix
+
+    # Get the absolute weights and rank features within each component
+    component_ranks = np.argsort(-np.abs(A_), axis=0)
+
+    # Select N unique features by cycling through components
+    selected_features = set()
+    num_components = A_.shape[1]
+    idx = 0
+    while len(selected_features) < N:
+        component = idx % num_components  # Cycle through components
+        feature_candidates = component_ranks[:, component]
+        for feature in feature_candidates:
+            if feature not in selected_features:
+                selected_features.add(feature)
+                break
+        idx += 1
+        if idx > 1000:  # Safety break to avoid infinite loop
+            break
+
+    return list(selected_features)
