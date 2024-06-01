@@ -7,6 +7,7 @@ from antipode import model_functions
 from antipode import plotting
 from antipode import model_modules
 from antipode import train_utils
+from antipode import post
 
 # You might also define some basic information or helper functions here
 __version__ = '0.1.0'

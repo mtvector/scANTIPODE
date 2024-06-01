@@ -376,9 +376,9 @@ class AntipodeSaveLoadMixin:
             warnings.warn(
                 "var_names for adata passed in does not match var_names of adata used to "
                 "train the model. For valid results, the vars need to be the same and in "
-                "the same order as the adata used to train the model.",
-                UserWarning,
-                stacklevel=settings.warnings_stacklevel,
+                "the same order as the adata used to train the model."#,
+                #UserWarning,
+                #stacklevel=settings.warnings_stacklevel,
             )    
     
     @classmethod
