@@ -1,6 +1,6 @@
 #Just run for longer
+# various import statements
 import os
-import sys
 import inspect
 import seaborn
 import matplotlib
@@ -33,7 +33,8 @@ import antipode.plotting
 from antipode.plotting import *
 
 
-max_steps=100000
+
+max_steps=1000000
 batch_key=sys.argv[3]
 discov_key=sys.argv[4]
 layer_key=sys.argv[5]
@@ -44,9 +45,10 @@ model_tag=str(sys.argv[2])
 antipode_model=antipode.antipode_model.ANTIPODE.load(sys.argv[2],adata=adata,prefix='p3_',device=device)
 antipode_model.train()
 
-antipode_model.train_phase(phase=3,max_steps=max_steps,print_every=10000,num_particles=5,device=device, max_learning_rate=1e-3, one_cycle_lr=True, steps=0, batch_size=64)
+antipode_model.train_phase(phase=3,max_steps=max_steps,print_every=10000,num_particles=7,device=device, max_learning_rate=1e-3, one_cycle_lr=True, steps=0, batch_size=64)
 
 antipode_model.store_outputs(device=device,prefix='')
+antipode_model.clear_cuda()
 MDE_KEY = "X_antipode_MDE"
 adata.obsm[MDE_KEY] = clip_latent_dimensions(scvi.model.utils.mde(adata.obsm['X_antipode'],init='random'),0.1)
 
