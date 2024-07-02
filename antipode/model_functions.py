@@ -119,7 +119,7 @@ def create_edge_matrices(level_assignments):
     return adjacency_matrices
 
 
-def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False):
+def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False,normalize=False):
     """
     Calculate the aggregated value (default is mean) for each column for each group combination in an AnnData object,
     returning a numpy array of the shape [cat_size0, cat_size1, ..., num_variables] and a dictionary of category orders.
@@ -176,8 +176,10 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
             else:
                 dense_data = data.toarray()
             
+            if normalize:
+                dense_data=dense_data/dense_data.sum(-1,keepdims=True)
+            
             # Apply the aggregation function and assign to the result
             result[combination] = agg_func(dense_data, axis=0)
-
     
     return result, category_orders

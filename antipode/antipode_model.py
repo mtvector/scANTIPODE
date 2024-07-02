@@ -31,7 +31,6 @@ from .model_functions import *
 from .train_utils import *
 from .plotting import *
 
-
 class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin):
     """
     ANTIPODE (Single Cell Ancestral Node Taxonomy Inference by Parcellation of Differential Expression) 
@@ -41,6 +40,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     adata (AnnData): The single-cell dataset encapsulated in an AnnData object.
     discov_pair (tuple): Specifies the discovery covariate's key and its location ('obs' or 'obsm') in the AnnData object.
     batch_pair (tuple): Specifies the batch covariate's key and its location ('obs' or 'obsm') in the AnnData object.
+    seccov_key (string):  Specifies the secondary covariate matrix's key in obsm in the AnnData object. Only affects DM.
     layer (str): The specific layer of the AnnData object to be analyzed.
     level_sizes (list of int): Defines the hierarchical model structure (corresponding to a layered tree) by specifying the size of each level. Make sure each layer gets progressively larger and ideally start with a single root. Defaults to [1, 10, 100].
     bi_depth (int): Tree depth (from root) for batch identity effect correction. Defaults to 2. Should be less than length of level_sizes
@@ -62,9 +62,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     sampler_category (string): Obs categorical column which will be used with the dataloader to sample each category with equal probability. (suggested use is the discov category)
     """
 
-    def __init__(self, adata, discov_pair, batch_pair, layer, level_sizes=[1,10,100],
+    def __init__(self, adata, discov_pair, batch_pair, layer, seccov_key='seccov_dummy', level_sizes=[1,10,100],
                  num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,sampler_category=None,
-                 loc_as_param=False,zdw_as_param=False,intercept_as_param=False,use_q_score=True,psi_levels=[True],
+                 loc_as_param=True,zdw_as_param=True,intercept_as_param=True,seccov_as_param=True,use_q_score=True,psi_levels=[True],
                  num_batch_embed=10,theta_prior=50.,min_theta=1.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500]):
 
@@ -73,11 +73,13 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         # Determine num_discov and num_batch from the AnnData object
         self.discov_loc, self.discov_key = discov_pair
         self.batch_loc, self.batch_key = batch_pair
+        self.seccov_key=seccov_key
         self.num_discov = adata.obsm[self.discov_key].shape[-1] if self.discov_loc == 'obsm' else len(adata.obs[self.discov_key].unique())
-        self.num_batch = adata.obsm[self.batch_key].shape[-1] if self.batch_loc == 'obsm' else len(adata.obs[self.batch_key].unique())
+        self.num_batch = adata.obsm[self.batch_key].shape[-1] if self.batch_loc == 'obsm' else len(adata.obs[self.batch_key].unique())        
         self.design_matrix = (self.discov_loc == 'obsm')
         self.layer = layer
-
+        self.num_seccov = adata.obsm[self.seccov_key].shape[-1] if self.seccov_key != 'seccov_dummy' else 1
+        
         self._setup_adata_manager_store: dict[str, type[scvi.data.AnnDataManager]] = {}
         self.num_var = adata.layers[layer].shape[-1]
         self.num_latent = num_latent
@@ -91,6 +93,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.use_q_score = use_q_score
         self.loc_as_param = loc_as_param
         self.zdw_as_param = zdw_as_param
+        self.seccov_as_param = seccov_as_param
         self.intercept_as_param = intercept_as_param
         self.theta_prior = theta_prior
         self.scale_init_val = scale_init_val
@@ -108,6 +111,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         # Initialize plates to be used during sampling
         self.var_plate = pyro.plate('var_plate',self.num_var,dim=-1)
         self.discov_plate = pyro.plate('discov_plate',self.num_discov,dim=-3)
+        self.seccov_plate = pyro.plate('seccov_plate',self.num_seccov,dim=-3)
         self.batch_plate = pyro.plate('batch_plate',self.num_batch,dim=-3)
         self.latent_plate = pyro.plate('latent_plate',self.num_latent,dim=-1)
         self.latent_plate2 = pyro.plate('latent_plate2',self.num_latent,dim=-2)
@@ -117,6 +121,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
 
         #Initialize MAP inference modules
         self.dm=MAPLaplaceModule(self,'discov_dm',[self.num_discov,self.num_labels,self.num_latent],[self.discov_plate,self.label_plate,self.latent_plate])
+        self.sm=MAPLaplaceModule(self,'seccov_dm',[self.num_seccov,self.num_labels,self.num_latent],[self.seccov_plate,self.label_plate,self.latent_plate],param_only=self.seccov_as_param)
         self.bm=MAPLaplaceModule(self,'batch_dm',[self.num_batch,self.num_labels,self.num_latent],[self.batch_plate,self.label_plate,self.latent_plate])
         self.di=MAPLaplaceModule(self,'discov_di',[self.num_discov,self.num_labels,self.num_var],[self.discov_plate,self.label_plate,self.var_plate])
         self.bei=MAPLaplaceModule(self,'batch_di',[self.num_batch_embed,self.bi_depth,self.num_var],[self.batch_embed_plate,self.bi_depth_plate,self.var_plate])
@@ -135,17 +140,19 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         if self.design_matrix:
             fields={'s':('layers',self.layer),
             'discov_ind':('obsm',self.discov_key),
-            'batch_ind':('obsm',self.batch_key)}
-            field_types={"s":np.float32,"batch_ind":np.float32,"discov_ind":np.float32}
+            'batch_ind':('obsm',self.batch_key),
+            'seccov':('obsm',self.seccov_key)}
+            field_types={"s":np.float32,"batch_ind":np.float32,"discov_ind":np.float32,'seccov':np.float32}
         else:
             fields={'s':('layers',self.layer),
             'discov_ind':('obs',self.discov_key),
-            'batch_ind':('obs',self.batch_key)}
-            field_types={"s":np.float32,"batch_ind":np.int64,"discov_ind":np.int64}
+            'batch_ind':('obs',self.batch_key),
+            'seccov':('obsm',self.seccov_key)}
+            field_types={"s":np.float32,"batch_ind":np.int64,"discov_ind":np.int64,'seccov':np.float32}
 
         self.fields=fields
         self.field_types=field_types
-        self.setup_anndata(adata, {'discov_ind': discov_pair, 'batch_ind': batch_pair}, self.field_types)
+        self.setup_anndata(adata, {'discov_ind': discov_pair, 'batch_ind': batch_pair,'seccov':self.seccov_key}, self.field_types)
         
         super().__init__()
         # Setup the various neural networks used in the model and guide
@@ -167,7 +174,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.args=inspect.getfullargspec(self.model).args[1:]#skip self
 
     def setup_anndata(self,adata: anndata.AnnData,fields,field_types,**kwargs,):
-        
+        if self.seccov_key == 'seccov_dummy':
+            adata.obsm['seccov_dummy']=np.zeros([adata.shape[0],1],dtype=np.int8)
         anndata_fields=[make_field(x,self.fields[x]) for x in self.fields.keys()]
             
         adata_manager = scvi.data.AnnDataManager(
@@ -192,7 +200,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.freeze_encoder=b
 
     # the generative model
-    def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
+    def model(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),seccov=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         # Register various nn.Modules (i.e. the decoder/encoder networks) with Pyro
         pyro.module("antipode", self)
 
@@ -239,11 +247,12 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                         else:#Only bottom layer is supervised?
                             taxon = taxon_probs = pyro.sample("taxon", dist.OneHotCategorical(probs=taxon_probs,validate_args=True),obs=taxon)
                             taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
+                            taxon = torch.concat(taxon,-1)
                     else:#Unsupervised
                         taxon = pyro.sample("taxon", 
                                          model_distributions.SafeAndRelaxedOneHotCategorical(temperature=self.temperature*s.new_ones(1),probs=taxon_probs,validate_args=True))                    
                         taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
-                    taxon = torch.concat(taxon,-1)
+                        taxon = torch.concat(taxon,-1)
                     taxon_probs=self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon_probs[...,-self.level_sizes[-1]:],level_edges,s)
                     taxon_probs=torch.cat(taxon_probs,-1)
                    
@@ -251,6 +260,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             scales=self.zs.model_sample(s,scale=fest([taxon_probs],-1))
             locs_dynam=self.zld.model_sample(s,scale=fest([taxon_probs],-1))
             discov_dm=self.dm.model_sample(s,scale=fest([discov,taxon_probs],-1))
+            seccov_dm=self.sm.model_sample(s,scale=fest([seccov.abs()+1e-10,taxon_probs],-1))
             discov_di=self.di.model_sample(s,scale=fest([discov,taxon_probs],-1))
             batch_dm=self.bm.model_sample(s,scale=fest([batch,taxon_probs],-1))
             
@@ -277,10 +287,11 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
             cur_dcd = oh_index(dcd, discov) if self.design_matrix else  dcd[discov_ind]
-            
-            z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
+            cur_seccov_dm=oh_index1(seccov_dm,seccov)
+                 
+            z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_seccov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)                
-            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(cur_discov_dm,taxon_probs) + oh_index2(cur_batch_dm,taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
+            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(cur_discov_dm,taxon_probs)+ oh_index2(cur_seccov_dm,taxon_probs) + oh_index2(cur_batch_dm,taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
             pseudo_z=self.z_transform(pseudo_z)
             z_decoder_weight=self.zdw.model_sample(s,scale=fest([pseudo_z.abs()],-1))
             discov_dc=self.dc.model_sample(s,scale=fest([discov,pseudo_z.abs()],-1))
@@ -302,7 +313,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
 
     
     # the variational distribution
-    def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
+    def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),seccov=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
         pyro.module("antipode", self)
         
         if not self.design_matrix:
@@ -347,8 +358,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     if sum(taxon.shape) > 1:
                         pass
                     else:
-                        taxon = pyro.sample("taxon", 
-                                         model_distributions.SafeAndRelaxedOneHotCategorical(temperature=self.temperature*s.new_ones(1),probs=taxon_probs,validate_args=True))                    
+                        taxon = pyro.sample("taxon", model_distributions.SafeAndRelaxedOneHotCategorical(temperature=self.temperature*s.new_ones(1), probs=taxon_probs,validate_args=True))                    
                     if taxon.shape[-1]<self.num_labels:
                         taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
                         taxon = torch.concat(taxon,-1)
@@ -360,20 +370,18 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             scales=self.zs.guide_sample(s,scale=fest([taxon_probs],-1))
             locs_dynam=self.zld.guide_sample(s,scale=fest([taxon_probs],-1))
             discov_dm=self.dm.guide_sample(s,scale=fest([discov,taxon_probs],-1))
+            seccov_dm=self.sm.guide_sample(s,scale=fest([seccov.abs()+1e-10,taxon_probs],-1))
             batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon_probs],-1))
             discov_di=self.di.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon_probs],-1))
-            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))#maybe should be abs sum bei
+            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
-
-            #For scaling
-            if self.design_matrix:
-                z=z+oh_index2(oh_index1(discov_dm,discov_ind),taxon) + oh_index2(oh_index1(batch_dm,batch_ind),taxon)+(oh_index(locs_dynam,taxon*psi))
-            else:
-                z=z+oh_index2(discov_dm[discov_ind],taxon) + oh_index2(batch_dm[batch_ind],taxon)+(oh_index(locs_dynam,taxon*psi))
+            cur_seccov_dm=oh_index1(seccov_dm,seccov)
+            
+            z=oh_index(locs,taxon)+oh_index2(cur_discov_dm,taxon)+oh_index2(cur_seccov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
             z=self.z_transform(z)
-            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(cur_discov_dm,taxon_probs) + oh_index2(cur_batch_dm,taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
+            pseudo_z=oh_index(locs,taxon_probs)+oh_index2(cur_discov_dm,taxon_probs)+oh_index2(cur_seccov_dm,taxon_probs) + oh_index2(cur_batch_dm,taxon_probs)+(oh_index(locs_dynam,taxon_probs*psi))
             pseudo_z=self.z_transform(pseudo_z)
             z_decoder_weight=self.zdw.guide_sample(s,scale=fest([pseudo_z.abs()],-1))
             discov_dc=self.dc.guide_sample(s,scale=fest([discov,pseudo_z.abs()],-1))

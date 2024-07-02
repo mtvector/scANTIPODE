@@ -136,7 +136,7 @@ def fest(tensors,unsqueeze=0,scalar=1.,epsilon=1e-10):
     '''
     einsum_str = ','.join(f'...z{chr(65 + i)}' for i, _ in enumerate(tensors))
     einsum_str += '->...' + ''.join(chr(65 + i) for i, _ in enumerate(tensors))
-    out=torch.einsum(einsum_str, *[x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
+    out=torch.einsum(einsum_str, * [x/(x.sum(-1,keepdim=True)) for x in tensors])[*indexing_none_list(unsqueeze)]
     #print(out.shape)
     return [poutine.scale(scale=scalar*out+epsilon)]
 
@@ -435,3 +435,5 @@ def create_weighted_random_sampler(series):
     # Create the WeightedRandomSampler
     sampler = torch.utils.data.WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
     return sampler
+
+

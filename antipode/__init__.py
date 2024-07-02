@@ -8,6 +8,8 @@ from antipode import plotting
 from antipode import model_modules
 from antipode import train_utils
 from antipode import post
+from antipode import anndata_utils
+from antipode import antipode_model
 
 # You might also define some basic information or helper functions here
 __version__ = '0.1.0'
