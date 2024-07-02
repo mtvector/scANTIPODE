@@ -4,6 +4,7 @@ from . import model_functions
 from .model_functions import *
 import pyro
 import pyro.distributions as dist
+from pyro import poutine
 import torch
 from torch.distributions import constraints
 import contextlib
@@ -184,7 +185,8 @@ class TreeConvergenceBottomUp(MMB):
     def just_propagate(self,y1,level_edges,s=torch.ones(1),strictness=None):
         results=[y1]
         for i in range(len(self.model.level_sizes) - 1):
-            result=results[i]@level_edges[-(i+1)]
+            #result = torch.einsum('...ij,...jk->...ik', results[i], level_edges[-(i+1)])
+            result = results[i] @ level_edges[-(i+1)]
             results.append(result)
         results=results[::-1]
         return(results)

@@ -5,7 +5,7 @@
 #SBATCH --time 72:00:00
 #SBATCH --partition celltypes
 #SBATCH --gres=gpu:1 --constraint="a100|v100"
-#SBATCH --mem 128gb
+#SBATCH --mem 255gb
 #SBATCH --ntasks 1
 
 source ~/.bashrc
