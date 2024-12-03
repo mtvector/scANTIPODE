@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Union, Literal, List, Dict
 from ete3 import Tree
 from scipy.sparse import csr_matrix
-
+import pandas as pd
 
 def h5_tree(val):
     tree = {}

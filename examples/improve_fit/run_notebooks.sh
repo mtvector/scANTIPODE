@@ -2,11 +2,11 @@
 #SBATCH --job-name nbconvert_array
 #SBATCH --output /home/matthew.schmitz/log/nbconvert_%A_%a.out # %A is replaced by job ID, %a by array index
 #SBATCH --error /home/matthew.schmitz/log/nbconvert_%A_%a.err
-#SBATCH --time 80:00:00
+#SBATCH --time 22:00:00
 #SBATCH --partition celltypes
-#SBATCH --array=26-26# Create an array job for each line in notebooks.txt
+#SBATCH --array=59# Create an array job for each line in notebooks.txt
 #SBATCH --gres=gpu:1 --constraint="a100|v100"#
-#SBATCH --mem 255gb
+#SBATCH --mem 127gb
 #SBATCH --ntasks 1
 #SBATCH --begin=now#+3hour
 

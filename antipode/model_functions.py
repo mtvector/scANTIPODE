@@ -119,7 +119,7 @@ def create_edge_matrices(level_assignments):
     return adjacency_matrices
 
 
-def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False,normalize=False):
+def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, obsm=False, normalize=False, batch_size=1000):
     """
     Calculate the aggregated value (default is mean) for each column for each group combination in an AnnData object,
     returning a numpy array of the shape [cat_size0, cat_size1, ..., num_variables] and a dictionary of category orders.
@@ -129,6 +129,8 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
     :param agg_func: Aggregation function to apply (e.g., np.mean, np.std). Default is np.mean.
     :param layer: Specify if a particular layer of the AnnData object is to be used.
     :param obsm: Boolean indicating whether to use data from .obsm attribute.
+    :param normalize: Boolean indicating whether to normalize the data.
+    :param batch_size: Size of the batches for processing the data.
     :return: Numpy array of calculated aggregates and a dictionary with category orders.
     """
     if not category_column_names:
@@ -165,21 +167,28 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
         selected_indices = np.where(mask)[0]
         
         if selected_indices.size > 0:
-            if obsm:
-                data = ad.obsm[layer][selected_indices]
-            else:
-                data = ad[selected_indices].X if layer is None else ad[selected_indices].layers[layer]
-
-            # Convert sparse matrix to dense if necessary
-            if isinstance(data, np.ndarray):
-                dense_data = data
-            else:
-                dense_data = data.toarray()
+            agg_results = []
+            for start in range(0, selected_indices.size, batch_size):
+                end = min(start + batch_size, selected_indices.size)
+                batch_indices = selected_indices[start:end]
+                
+                if obsm:
+                    data = ad.obsm[layer][batch_indices]
+                else:
+                    data = ad[batch_indices].X if layer is None else ad[batch_indices].layers[layer]
+                
+                # Convert sparse matrix to dense if necessary
+                if isinstance(data, np.ndarray):
+                    dense_data = data
+                else:
+                    dense_data = data.toarray()
+                
+                if normalize:
+                    dense_data = dense_data / (1. + dense_data.sum(-1, keepdims=True))
+                
+                agg_results.append(agg_func(dense_data, axis=0)*((end-start)/selected_indices.size))
             
-            if normalize:
-                dense_data=dense_data/dense_data.sum(-1,keepdims=True)
-            
-            # Apply the aggregation function and assign to the result
-            result[combination] = agg_func(dense_data, axis=0)
+            # Combine results from all batches
+            result[combination] = np.sum(np.array(agg_results), axis=0)
     
     return result, category_orders

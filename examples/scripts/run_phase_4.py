@@ -55,12 +55,12 @@ adata.obsm[MDE_KEY] = clip_latent_dimensions(scvi.model.utils.mde(adata.obsm['X_
 
 antipode_model.save(sys.argv[2],save_anndata=True,prefix='p5_')
 
-import rapids_singlecell as rsc
-dim_weights=np.absolute(adata.uns['param_store']['z_decoder_weight']).mean(1)
-#adata.obsm['X_weighted_antipode']=adata.obsm['X_antipode']*dim_weights
-rsc.pp.neighbors(adata, n_neighbors=50, use_rep='X_antipode')
-rsc.tl.umap(adata,spread=4.,min_dist=0.)
-adata.obsm['X_umap']=antipode.plotting.clip_latent_dimensions(adata.obsm['X_umap'],0.01)
+# import rapids_singlecell as rsc
+# dim_weights=np.absolute(adata.uns['param_store']['z_decoder_weight']).mean(1)
+# #adata.obsm['X_weighted_antipode']=adata.obsm['X_antipode']*dim_weights
+# rsc.pp.neighbors(adata, n_neighbors=50, use_rep='X_antipode')
+# rsc.tl.umap(adata,spread=4.,min_dist=0.)
+# adata.obsm['X_umap']=antipode.plotting.clip_latent_dimensions(adata.obsm['X_umap'],0.01)
 
 antipode_model.save(sys.argv[2],save_anndata=True,prefix='p5_')
 np.savetxt(os.path.join(sys.argv[2],"X_umap.csv"), adata.obsm['X_umap'], delimiter=",")
