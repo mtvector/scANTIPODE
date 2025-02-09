@@ -19,6 +19,9 @@ def safe_sigmoid(x,eps=1e-10):
 def centered_sigmoid(x):
     return (2*(torch.sigmoid(x)-0.5))
 
+def hardmax(x,axis=-1):
+    return(torch.nn.functional.one_hot(x.max(axis)[1],x.shape[axis]).float())
+
 def numpy_centered_sigmoid(x):
     return((scipy.special.expit(x)-0.5)*2)
 
@@ -192,3 +195,14 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
             result[combination] = np.sum(np.array(agg_results), axis=0)
     
     return result, category_orders
+
+
+def safe_log_transform(x):
+    nonzero = x[x > 0]
+    offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10
+    return np.log(x + offset)
+
+def pandas_numericategorical(col):
+    col = col.astype('category')
+    return col.cat.reorder_categories(col.cat.categories[np.argsort(col.cat.categories.astype(float))])
+

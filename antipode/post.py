@@ -4,7 +4,7 @@ import numpy as np
 import tqdm
 from . import plotting
 
-def get_quantile_markers(df,q=0.95):
+def get_quantile_markers(df,q=0.95,threshold=-9999999.):
     """
     Get the markers for the rows of a dataframe.
 

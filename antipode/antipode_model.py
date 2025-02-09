@@ -105,7 +105,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.sampler_category = sampler_category
         self.psi_levels = [float(x) for x in psi_levels]
         self.min_theta=min_theta
-
+        
         self.dcd_prior = torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
                 
         # Initialize plates to be used during sampling
@@ -216,17 +216,16 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         minibatch_plate=pyro.plate("minibatch_plate", s.shape[0],dim=-1)
         minibatch_plate2=pyro.plate("minibatch_plate2", s.shape[0],dim=-2)
         l = s.sum(1).unsqueeze(-1)
-        
+                
         # Scale all sample statements for numerical stability
         with poutine.scale(scale=self.scale_factor):
             # Counts parameter of NB (variance of the observation distribution)
             s_theta = pyro.param("s_inverse_dispersion", self.theta_prior * s.new_ones(self.num_var),
                                constraint=constraints.positive)
-            
             #Weak overall histogram normalization
             discov_mul = pyro.param("discov_mul", s.new_ones(self.num_discov,1),constraint=constraints.positive) if self.dist_normalize else s.new_ones(self.num_discov,1)
             cur_discov_mul = torch.einsum('do,bd->bo',discov_mul, discov_ind) if self.design_matrix else discov_mul[discov_ind]
-
+            
             dcd=pyro.param("discov_constitutive_de", self.dcd_prior.to(s.device))
             level_edges=self.tree_edges.model_sample(s,approx=self.approx)
             quality_genes=self.qg.model_sample(s) if self.use_q_score else 0.
@@ -240,15 +239,17 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     taxon_probs = pyro.sample("taxon_probs", dist.Beta(beta_prior_a,s.new_ones(self.num_labels),validate_args=True).to_event(1))
                     taxon = pyro.sample('taxon',dist.RelaxedBernoulli(temperature=0.1*s.new_ones(1),probs=taxon_probs).to_event(1))
                 else:
-                    taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(s.shape[0],self.level_sizes[-1]),validate_args=True))
                     if sum(taxon.shape) > 1:#Supervised?
                         if taxon.shape[-1]==self.num_labels:#Totally supervised?
+                            taxon_probs = taxon
                             pass
                         else:#Only bottom layer is supervised?
+                            taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(s.shape[0],self.level_sizes[-1]),validate_args=True))
                             taxon = taxon_probs = pyro.sample("taxon", dist.OneHotCategorical(probs=taxon_probs,validate_args=True),obs=taxon)
                             taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
                             taxon = torch.concat(taxon,-1)
                     else:#Unsupervised
+                        taxon_probs=pyro.sample('taxon_probs',dist.Dirichlet(s.new_ones(s.shape[0],self.level_sizes[-1]),validate_args=True))
                         taxon = pyro.sample("taxon", 
                                          model_distributions.SafeAndRelaxedOneHotCategorical(temperature=self.temperature*s.new_ones(1),probs=taxon_probs,validate_args=True))                    
                         taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
@@ -299,18 +300,19 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             cur_discov_dc = oh_index1(discov_dc, discov_ind) if self.design_matrix else discov_dc[discov_ind]
             cur_discov_di=oh_index2(cur_discov_di,taxon)
             cur_cluster_intercept=oh_index(cluster_intercept,taxon) if not self.approx else 0.
-            
+
             mu=torch.einsum('...bi,...bij->...bj',z,z_decoder_weight+cur_discov_dc)#+bc
             spliced_mu=mu+cur_dcd+cur_discov_di+cur_cluster_intercept+bi+((1-q)*quality_genes)
             norm_spliced_mu=spliced_mu*cur_discov_mul
-            spliced_out=softmax(norm_spliced_mu,dim=-1)
-            log_mu = (l * spliced_out + 1e-6).log()
+            
+            softmax_shift=pyro.param('softmax_shift',norm_spliced_mu.exp().sum(-1).mean().log().detach())
+            log_mu = l.log() + norm_spliced_mu - softmax_shift
             s_theta = (s_theta * q) + self.min_theta
             
             with self.var_plate,minibatch_plate2:
-                s_dist = dist.NegativeBinomial(total_count=s_theta + 0.1,logits=log_mu-s_theta.log(),validate_args=True)
+                s_dist = dist.NegativeBinomial(total_count=s_theta,logits=log_mu-s_theta.log(),validate_args=True)
                 s_out=pyro.sample("s", s_dist, obs=s.int())
-
+            return(norm_spliced_mu - softmax_shift)
     
     # the variational distribution
     def guide(self, s,discov_ind=torch.zeros(1),batch_ind=torch.zeros(1),seccov=torch.zeros(1),step=torch.ones(1),taxon=torch.zeros(1),Z_obs=torch.zeros(1)):
@@ -346,7 +348,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                 pyro.sample('z_loc',dist.Delta(z_loc).to_event(1))
                 z=self.z_transform(z)
                 taxon_logits,psi_loc,psi_scale=self.classifier(z)
-                psi=centered_sigmoid(pyro.sample('psi',dist.Normal(psi_loc,psi_scale+self.epsilon).to_event(1)))
+                psi=pyro.sample('psi',dist.Normal(psi_loc,psi_scale+self.epsilon).to_event(1))
                 psi=psi*torch.tensor(self.psi_levels).to(s.device).unsqueeze(0)
                 psi = 0 if not self.use_psi or self.approx else torch.repeat_interleave(psi, torch.tensor(self.level_sizes).to(s.device), dim=1)
                 if self.approx:
@@ -354,10 +356,13 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                     taxon_probs = pyro.sample("taxon_probs", taxon_dist)
                     taxon = pyro.sample('taxon',dist.RelaxedBernoulli(temperature=self.temperature*s.new_ones(1),probs=taxon_probs).to_event(1))
                 else:
-                    taxon_probs=pyro.sample('taxon_probs',dist.Delta(safe_softmax(taxon_logits[...,-self.level_sizes[-1]:],eps=1e-5)).to_event(1))
                     if sum(taxon.shape) > 1:
-                        pass
+                        if taxon.shape[-1]==self.num_labels:#Totally supervised?
+                            taxon_probs = taxon
+                        else:#Only bottom layer is supervised?
+                            taxon_probs=pyro.sample('taxon_probs',dist.Delta(safe_softmax(taxon_logits[...,-self.level_sizes[-1]:],eps=1e-5)).to_event(1))
                     else:
+                        taxon_probs=pyro.sample('taxon_probs',dist.Delta(safe_softmax(taxon_logits[...,-self.level_sizes[-1]:],eps=1e-5)).to_event(1))
                         taxon = pyro.sample("taxon", model_distributions.SafeAndRelaxedOneHotCategorical(temperature=self.temperature*s.new_ones(1), probs=taxon_probs,validate_args=True))                    
                     if taxon.shape[-1]<self.num_labels:
                         taxon = self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s) if self.freeze_encoder else self.tree_convergence_bottom_up.just_propagate(taxon,level_edges,s)
@@ -374,7 +379,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon_probs],-1))
             discov_di=self.di.guide_sample(s,scale=fest([discov,taxon_probs],-1))
             cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon_probs],-1))
-            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))
+            bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))#maybe should be abs sum bei
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
             cur_seccov_dm=oh_index1(seccov_dm,seccov)

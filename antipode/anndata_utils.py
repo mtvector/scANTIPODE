@@ -155,8 +155,7 @@ def read_h5ad_backed_selective(
 ) -> AnnData:
     f = h5py.File(filename, mode)
 
-    attributes = ["obsm", "varm", "obsp", "varp", "uns", "layers"]
-    df_attributes = ["obs", "var"]
+    selected_keys += ["_index"]
 
     tree = h5_tree(f)
     selected_tree = prune_tree(tree, selected_keys)
@@ -169,4 +168,13 @@ def read_h5ad_backed_selective(
         return d
     else:
         adata = AnnData(**d)
+        if "_index" in adata.obs.columns:
+            index_series = adata.obs["_index"].astype('string')
+            adata.obs.index = list(index_series)
+            adata.obs.drop("_index",axis=1, inplace=True)
+        if "_index" in adata.var.columns:
+            index_series = adata.var["_index"].astype('string')
+            adata.var.index = list(index_series)
+            adata.var.drop("_index",axis=1, inplace=True)
         return adata
+

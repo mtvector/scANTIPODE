@@ -1,0 +1,41 @@
+[build-system]
+requires = [
+    "setuptools>=42",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antipode"
+version = "0.1"
+description = "Simultaneous integration, differential expression and clustering of single cell RNAseq data using pyro-powered variational inference."
+readme = { file = "README.md", "content-type" = "text/markdown" }
+requires-python = ">=3.10"
+
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics"
+]
+
+authors = [
+  { name = "Matthew Schmitz" }
+]
+
+dependencies = [
+    "scanpy",
+    "scvi-tools",
+    "pyro-ppl",
+    "seaborn",
+    "ete3",
+    "scikit-learn",
+    "PyComplexHeatmap"
+]
+
+[project.urls]
+"Source" = "https://github.com/mtvector/scANTIPODE"
+
+[tool.setuptools]
+packages = { find = {} }
+
+# [tool.setuptools.packages.find]
+# exclude = ["tests*"]

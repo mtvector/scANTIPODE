@@ -40,7 +40,7 @@ class AntipodeTrainingMixin:
     
     def save_params_to_uns(self,prefix=''):
         pstore=param_store_to_numpy()
-        pstore={n:pstore[n] for n in pstore.keys() if not re.search('encoder|classifier|be_nn|\$\$\$',n)}
+        pstore={n:pstore[n] for n in pstore.keys() if not re.search('encoder|classifier|be_nn|\\$\\$\\$',n)}
         pstore={n:pstore[n] for n in pstore.keys() if not np.isnan(pstore[n]).any()}
         self.adata_manager.adata.uns[prefix+'param_store']=pstore
 
@@ -166,17 +166,17 @@ class AntipodeTrainingMixin:
              torch.tensor(new_scales+1e-10,device=device,requires_grad=True)],axis=0).float()
         self.adata_manager.adata.obs[cluster].astype(str)
         pyro.get_param_store().__setitem__('locs',new_locs)
-        pyro.get_param_store().__setitem__('locs_dynam',new_locs.new_zeros(new_locs.shape))
+        pyro.get_param_store().__setitem__('locs_dynam',1e-5*torch.randn(new_locs.shape,device=new_locs.device))
         pyro.get_param_store().__setitem__('scales',new_scales)
         self.adata_manager.adata.obs[cluster]=self.adata_manager.adata.obs[cluster].astype(str)
-        pyro.get_param_store().__setitem__('discov_dm',new_locs.new_zeros(pyro.param('discov_dm').shape))
-        pyro.get_param_store().__setitem__('seccov_dm',new_locs.new_zeros(pyro.param('seccov_dm').shape))
-        pyro.get_param_store().__setitem__('batch_dm',new_locs.new_zeros(pyro.param('batch_dm').shape))
-        pyro.get_param_store().__setitem__('discov_di',new_locs.new_zeros(pyro.param('discov_di').shape))
-        pyro.get_param_store().__setitem__('batch_di',new_locs.new_zeros(pyro.param('batch_di').shape))
-        pyro.get_param_store().__setitem__('cluster_intercept',new_locs.new_zeros(pyro.param('cluster_intercept').shape))
+        pyro.get_param_store().__setitem__('discov_dm',1e-5*torch.randn(pyro.param('discov_dm').shape,device=new_locs.device))
+        pyro.get_param_store().__setitem__('seccov_dm',1e-5*torch.randn(pyro.param('seccov_dm').shape,device=new_locs.device))
+        pyro.get_param_store().__setitem__('batch_dm',1e-5*torch.randn(pyro.param('batch_dm').shape,device=new_locs.device))
+        pyro.get_param_store().__setitem__('discov_di',1e-5*torch.randn(pyro.param('discov_di').shape,device=new_locs.device))
+        pyro.get_param_store().__setitem__('batch_di',1e-5*torch.randn(pyro.param('batch_di').shape,device=new_locs.device))
+        pyro.get_param_store().__setitem__('cluster_intercept',1e-5*torch.randn(pyro.param('cluster_intercept').shape,device=new_locs.device))
         if reset_dc: #DC doesn't necessarily need to be reset, can explode challenging models
-            pyro.get_param_store().__setitem__('discov_dc',new_locs.new_zeros(pyro.param('discov_dc').shape))
+            pyro.get_param_store().__setitem__('discov_dc',1e-5*torch.randn(pyro.param('discov_dc').shape,device=new_locs.device))
     
     def common_training_loop(self, dataloader, max_steps, scheduler, svi, print_every, device, steps=0):
         self.losses = []
@@ -246,7 +246,51 @@ class AntipodeTrainingMixin:
         self = self.to(device)
         self.set_approx(phase == 1)
         return self.common_training_loop(dataloader, max_steps, scheduler, svi, print_every, device, steps)
+
+
+    def run_standard_protocol(self,out_path,max_steps=500000,num_particles=3,device='cuda',max_learning_rate=1e-3,one_cycle_lr=True,batch_size=32):
+        '''Run ANTIPODE from scratch through 3 training phases, followed by parameter correction.'''
+        print('Running phase 1')
+        self.train_phase(phase=1,max_steps=max_steps,
+                         print_every=10000,num_particles=num_particles,
+                         device=device, max_learning_rate=max_learning_rate,
+                         one_cycle_lr=one_cycle_lr, batch_size=batch_size,
+                         clip_std=100.)
         
+        plot_loss(self.losses)
+        self.store_outputs(device=device,prefix='')
+        self.clear_cuda()
+        self.save(out_path,save_anndata=False,prefix='p1_')
+        
+        print('Running phase 2')
+        self.prepare_phase_2(epochs=2,device=device,dimension_reduction='X_antipode')
+        self.train_phase(phase=2,max_steps=int(max_steps/2),
+                         print_every=10000,num_particles=num_particles,
+                         device=device, max_learning_rate=max_learning_rate, 
+                         one_cycle_lr=one_cycle_lr,batch_size=batch_size,
+                         freeze_encoder=True,clip_std=100.)
+        
+        plot_loss(self.losses)
+        self.store_outputs(device=device,prefix='')
+        self.clear_cuda()
+        self.save(out_path,save_anndata=False,prefix='p2_')
+        
+        print('Running phase 3')
+        self.train_phase(phase=3,max_steps=max_steps,
+                         print_every=10000,num_particles=num_particles,
+                         device=device, max_learning_rate=max_learning_rate, 
+                         one_cycle_lr=one_cycle_lr, batch_size=batch_size,clip_std=100)
+        
+        plot_loss(self.losses)
+        self.store_outputs(device=device,prefix='')
+        self.clear_cuda()
+        self.save(out_path,save_anndata=False,prefix='p3_')
+        self.to(device)
+        print('Running final correction')
+        posterior_out,posterior_categories = self.correct_fits(batch_size=batch_size, n_steps = 100000)
+        self.store_outputs(device=device,prefix='')
+        self.save(out_path,save_anndata=True,prefix='p4_')
+    
     def allDone(self):
         print("Finished training!")
         self.to('cpu')
@@ -271,6 +315,472 @@ class AntipodeTrainingMixin:
             exc_type, exc_value, exc_traceback = sys.exc_info()
             traceback.clear_frames(exc_traceback)
 
+    def calculate_cluster_params(self, flavor:['torch','numpy'] = 'numpy',prefix=''):
+        adata = self.adata_manager.adata
+        leaf_level = 'level_' + str(len(self.level_sizes)-1)
+        if flavor == 'torch':
+            pstore=pyro.get_param_store()
+            n_clusters=self.level_sizes[-1]
+            level_edges=[hardmax(pstore['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
+            levels=self.tree_convergence_bottom_up.just_propagate(torch.eye(self.level_sizes[-1],device=pstore['locs'].device),level_edges)
+            prop_taxon=torch.tensor(torch.cat(levels,dim=-1),device=pstore['locs'].device).float()
+            
+            discov_labels=adata.obs[self.discov_key].cat.categories
+            latent_labels=[str(x) for x in range(pstore['discov_dc'].shape[1])]
+            adata.obs[leaf_level]=adata.obs[leaf_level].astype('category')
+            cluster_index=adata.obs[leaf_level].cat.categories.astype(int)#list(range(antipode_model.level_sizes[-1]))#list(range(pstore['locs'].shape[0]))
+            cluster_labels=list(adata.obs[leaf_level].cat.categories)
+            cluster_label_dict=dict(zip(cluster_index,cluster_labels))
+            var_labels=adata.var.index
+            
+            prop_locs=prop_taxon@pstore['locs']
+            prop_cluster_intercept=prop_taxon@pstore['cluster_intercept']
+            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+torch.mean(pstore['discov_constitutive_de'],0,keepdims=True))
+            cluster_params=cluster_params[cluster_index,:]
+            
+            #Need to propagate multilayer tree to discovs
+            prop_discov_di = torch.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
+            prop_discov_dm = torch.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
+            discov_cluster_params=(torch.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+pstore['discov_constitutive_de'].unsqueeze(1)))-pstore['softmax_shift']
+            return torch.tensor(discov_cluster_params),torch.tensor(cluster_params), cluster_labels,var_labels,(torch.tensor(prop_taxon), torch.tensor(prop_locs),torch.tensor(prop_discov_di),torch.tensor(prop_discov_dm))
+        else:
+            pstore=adata.uns[prefix+'param_store']
+            n_clusters=self.level_sizes[-1]
+            level_edges=[numpy_hardmax(self.adata_manager.adata.uns[prefix+'param_store']['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
+            levels=self.tree_convergence_bottom_up.just_propagate(np.eye(self.level_sizes[-1]),level_edges)
+            prop_taxon=np.concatenate(levels,axis=-1)
+            
+            discov_labels=adata.obs[self.discov_key].cat.categories
+            latent_labels=[str(x) for x in range(pstore['discov_dc'].shape[1])]
+            adata.obs[leaf_level]=adata.obs[leaf_level].astype('category')
+            cluster_index=adata.obs[leaf_level].cat.categories.astype(int)#list(range(antipode_model.level_sizes[-1]))#list(range(pstore['locs'].shape[0]))
+            cluster_labels=list(adata.obs[leaf_level].cat.categories)
+            cluster_label_dict=dict(zip(cluster_index,cluster_labels))
+            var_labels=adata.var.index
+            
+            prop_locs=prop_taxon@pstore['locs']
+            prop_cluster_intercept=prop_taxon@pstore['cluster_intercept']
+            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+np.mean(pstore['discov_constitutive_de'],0,keepdims=True))
+            cluster_params=cluster_params[cluster_index,:]
+            
+            #Need to propagate multilayer tree to discovs
+            prop_discov_di = np.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
+            prop_discov_dm = np.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
+            discov_cluster_params=(np.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+np.expand_dims(pstore['discov_constitutive_de'],1)))-pstore['softmax_shift']
+            return discov_cluster_params,cluster_params, cluster_labels,var_labels,(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm)
+    
+    def sub_model_log_residuals(
+        self,
+        log_residuals: torch.Tensor,
+        leaf_cat_to_idx: dict,
+        sigma: float = 0.2,
+    ):
+        """
+        A 'sub-model' that replicates the same final "discov_cluster_params" 
+        calculation your snippet showed, then places a Normal likelihood on the 
+        log-residuals. The shape of 'discov_cluster_params' is (num_discov, num_leaf, num_genes),
+        matching the shape of log_residuals.
+    
+        Args:
+          log_residuals: shape (num_discov, num_leaf, num_genes), i.e. the difference
+                         [log_actual_means - log_posterior_means].
+          antipode_model: your main model (self in correct_fits).
+          leaf_cat_to_idx: map from each leaf category to the correct index 
+                           in discov_di & cluster_intercept if needed (unused here).
+          sigma: stdev for the Normal distribution that ties residuals together.
+        """
+    
+        pyro.module("antipode_mini", self)
+    
+        # For convenience, gather the Pyro param store
+        pstore = pyro.get_param_store()
+    
+        adata = self.adata_manager.adata
+        device = log_residuals.device
+    
+        n_clusters = self.level_sizes[-1]
+        level_edges = []
+        for i in range(len(self.level_sizes) - 1):
+            edges_i = pstore[f"edges_{i}"]  # e.g. shape: (some_dim, some_dim)
+            edges_i_hard = hardmax(edges_i, axis=-1)
+            level_edges.append(edges_i_hard)
+    
+        eye_bottom = torch.eye(n_clusters, device=device)
+        levels = self.tree_convergence_bottom_up.just_propagate(eye_bottom, level_edges)
+        prop_taxon = torch.cat(levels, dim=-1)  # shape: (n_clusters, sum_of_levels)
+        
+        locs = pstore["locs"].detach()                     # shape: (sum_of_levels, num_latent) fix locs so it remains compatible with dl inference
+        # z_decoder_weight = pstore["z_decoder_weight"]      # shape: (num_latent, num_genes)
+        # cluster_intercept = pstore["cluster_intercept"]    # shape: (sum_of_levels, num_genes)
+        # discov_dc = pstore["discov_dc"]                    # shape: (num_discov, num_latent, num_genes)
+        # discov_di = pstore["discov_di"]                    # shape: (num_discov, sum_of_levels, num_genes)
+        # discov_dm = pstore["discov_dm"]                    # shape: (num_discov, sum_of_levels, num_latent)
+        discov_constitutive_de = pstore["discov_constitutive_de"].detach()  # shape: (num_discov, num_genes)
+        softmax_shift = pstore["softmax_shift"].detach()            # shape: scalar or (1,)
+        
+        # locs=self.zl.model_sample(log_residuals)
+        discov_dm=self.dm.model_sample(log_residuals)
+        discov_di=self.di.model_sample(log_residuals)
+        cluster_intercept=self.ci.model_sample(log_residuals)
+        z_decoder_weight=self.zdw.model_sample(log_residuals)
+        discov_dc=self.dc.model_sample(log_residuals)
+    
+        prop_locs = prop_taxon @ locs
+        # shape => (n_clusters, num_latent)
+    
+        prop_cluster_intercept = prop_taxon @ cluster_intercept
+        # shape => (n_clusters, num_genes)
+    
+        cluster_params = (prop_locs @ z_decoder_weight) + prop_cluster_intercept + torch.mean(
+            discov_constitutive_de, dim=0, keepdim=True
+        )
+        prop_discov_di = torch.einsum("pc, dcg -> dpg", prop_taxon, discov_di)
+        prop_discov_dm = torch.einsum("pc, dcm -> dpm", prop_taxon, discov_dm)
+    
+        prop_locs_expanded = prop_locs.unsqueeze(0)  # (1, n_clusters, num_latent)
+        prop_locs_plus_dm = prop_locs_expanded + prop_discov_dm
+        # shape => (num_discov, n_clusters, num_latent)
+    
+        # z_decoder_weight + discov_dc => shape => (num_latent, num_genes) + (num_discov, num_latent, num_genes)
+        # we need to broadcast across discov dimension => do an unsqueeze on z_decoder_weight for discov
+        zdw_expanded = z_decoder_weight.unsqueeze(0)  # shape => (1, num_latent, num_genes)
+        zdw_plus_discov_dc = zdw_expanded + discov_dc  # => shape => (num_discov, num_latent, num_genes)
+    
+        discov_cluster_expr = torch.einsum("dpm, dmg -> dpg", prop_locs_plus_dm, zdw_plus_discov_dc)
+        pci_expanded = prop_cluster_intercept.unsqueeze(0)  # => (1, n_clusters, num_genes)
+        di_plus_ci = pci_expanded + prop_discov_di  # shape => (num_discov, n_clusters, num_genes)
+    
+        # discov_constitutive_de => shape (num_discov, num_genes)
+        # unsqueeze(1) => (num_discov, 1, num_genes) => broadcast
+        dcd_unsqueezed = discov_constitutive_de.unsqueeze(1)
+    
+        discov_cluster_params = (
+            discov_cluster_expr + di_plus_ci + dcd_unsqueezed
+        ) - softmax_shift  # shape => (num_discov, n_clusters, num_genes)
+
+        discov_cluster_params = discov_cluster_params[:,self.obs_leaves,:]
+
+        num_discov, num_leaf, num_genes = log_residuals.shape
+        with pyro.plate("disc", num_discov, dim=-3):
+            with pyro.plate("leaf", num_leaf, dim=-2):
+                with pyro.plate("gene", num_genes, dim=-1):
+                    pyro.sample(
+                        "residual_obs",
+                        dist.Laplace(discov_cluster_params, sigma),
+                        obs=log_residuals,
+                    )
+    
+    def sub_guide_log_residuals(
+        self,
+        log_residuals: torch.Tensor,
+        leaf_cat_to_idx: dict,
+        sigma: float = 0.2,
+    ):
+        pyro.module("antipode_mini", self)
+        # locs=self.zl.guide_sample(log_residuals)
+        discov_dm=self.dm.guide_sample(log_residuals)
+        discov_di=self.di.guide_sample(log_residuals)
+        cluster_intercept=self.ci.guide_sample(log_residuals)
+        z_decoder_weight=self.zdw.guide_sample(log_residuals)
+        discov_dc=self.dc.guide_sample(log_residuals)
+    
+        
+    def correct_fits(self, batch_size=128,device = 'cpu', n_steps = 100000,num_particles=3):
+        leaf_level_col = 'level_' + str(len(self.level_sizes) - 1)
+        adata = self.adata_manager.adata
+        adata.obs[leaf_level_col] = pandas_numericategorical(
+            adata.obs[leaf_level_col].astype(int)
+        )
+    
+        device = pyro.param("locs").device
+        self.freeze_encoder = False
+    
+        dataloader = scvi.dataloaders.AnnDataLoader(
+            self.adata_manager,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=False,
+            data_and_attributes=self.field_types
+        )
+    
+        self.to(device)
+        self.eval()
+    
+        discov_cats = adata.obs[self.discov_key].cat.categories
+        leaf_cats = adata.obs[leaf_level_col].cat.categories.astype(int)
+        num_discov = len(discov_cats)
+        num_leaf = len(leaf_cats)
+    
+        # Collect the posterior means
+        first_batch = True
+        sum_post = None
+        count_post = None
+        has_indices = False
+        for x in dataloader:
+            if "ind_x" in x.keys():
+                has_indices = True
+            break
+    
+        # re-init
+        dataloader = scvi.dataloaders.AnnDataLoader(
+            self.adata_manager,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=False,
+            data_and_attributes=self.field_types
+        )
+        cell_counter = 0
+    
+        with torch.no_grad():
+            for x_dict in tqdm.tqdm(dataloader):
+                x = {k: v.to(device) for k, v in x_dict.items()}
+                guide_trace = poutine.trace(self.guide).get_trace(**x)
+                model_trace = poutine.trace(
+                    poutine.replay(self.model, trace=guide_trace)
+                ).get_trace(**x)
+                batch_posterior_out = model_trace.nodes["_RETURN"]["value"]
+                batch_posterior_out = torch.exp(batch_posterior_out).cpu().numpy()
+    
+                if first_batch:
+                    num_features = batch_posterior_out.shape[1]
+                    sum_post = np.zeros(
+                        (num_discov, num_leaf, num_features),
+                        dtype=np.float64
+                    )
+                    count_post = np.zeros(
+                        (num_discov, num_leaf),
+                        dtype=np.float64
+                    )
+                    first_batch = False
+    
+                if has_indices:
+                    batch_indices = x["ind_x"].cpu().numpy()
+                else:
+                    bsz = batch_posterior_out.shape[0]
+                    batch_indices = np.arange(cell_counter, cell_counter + bsz)
+                    cell_counter += bsz
+    
+                # Map cells to categories
+                discov_codes = adata.obs[self.discov_key].cat.codes[batch_indices].values
+                leaf_codes = adata.obs[leaf_level_col].cat.codes[batch_indices].values
+    
+                for i, (dcv, lfv) in enumerate(zip(discov_codes, leaf_codes)):
+                    sum_post[dcv, lfv, :] += batch_posterior_out[i]
+                    count_post[dcv, lfv] += 1
+
+                # if cell_counter > 50000:
+                #     break
+    
+        # Compute final posterior means
+        denom = np.maximum(count_post[..., None], 1)
+        posterior_means = sum_post / denom
+    
+        # Compute actual means
+        actual_means, actual_orders = group_aggr_anndata(
+            adata,
+            [self.discov_key, leaf_level_col],
+            layer=self.layer,
+            normalize=True
+        )
+
+        self.obs_leaves = leaf_cats
+        discov_cluster_params,cluster_params, cluster_labels,var_labels,(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm) = self.calculate_cluster_params(flavor = 'torch')
+        discov_cluster_params = discov_cluster_params[:,leaf_cats,:]
+        log_actual_means = safe_log_transform(actual_means)
+        min_val = log_actual_means.min() #The lower bound for log values
+        log_posterior_means = np.log(posterior_means + np.exp(min_val))
+        log_residuals_np = (log_actual_means - log_posterior_means)
+
+        # Convert to torch
+        log_residuals = torch.tensor(log_residuals_np, dtype=torch.float32, device=device)
+        log_actual_means = torch.tensor(log_actual_means, device=device)
+        
+        corrected_means = torch.log(torch.exp(discov_cluster_params + log_residuals) + np.exp(min_val))
+        
+        # Build or reuse your leaf_cat_to_idx
+        non_leaf = np.sum(self.level_sizes[:-1])
+        leaf_cat_to_idx = {cat: cat + non_leaf for i, cat in enumerate(leaf_cats)}
+    
+        for name, param in pyro.get_param_store().items():
+            pyro.get_param_store()[name] = param.to(device)
+        self = self.to(device)
+        log_residuals = log_residuals.to(device)
+        # seaborn.scatterplot(x=discov_cluster_params.detach().cpu().numpy().flatten(), y=log_residuals.detach().cpu().numpy().flatten(),s=0.2,color='black')
+        # plt.show()
+        # seaborn.scatterplot(x=discov_cluster_params.detach().cpu().numpy().flatten(), y=log_actual_means.detach().cpu().numpy().flatten(),s=0.2,color='black')
+        # plt.show()
+        # seaborn.scatterplot(x=log_actual_means.detach().cpu().numpy().flatten(), y=log_posterior_means.flatten(),s=0.2,color='black')
+        # plt.show()
+        
+        self.run_sub_svi_for_log_residuals(
+            log_residuals=corrected_means,
+            leaf_cat_to_idx=leaf_cat_to_idx,
+            sigma=1.,
+            lr=1e-2,
+            n_steps=n_steps,
+            num_particles = num_particles
+        )
+        
+        return posterior_means, actual_orders
+
+
+    def run_sub_svi_for_log_residuals(
+        self,
+        log_residuals: torch.Tensor,
+        leaf_cat_to_idx: dict,
+        sigma: float = 0.2,
+        lr: float = 1e-4,
+        n_steps: int = 5000,
+        num_particles = 3
+    ):
+        """
+        Runs a short SVI pass on the sub_model_log_residuals/sub_guide_log_residuals,
+        effectively adjusting the MAPLaplaceModule parameters so that
+        predicted offsets match the observed log_residuals.
+        """
+        
+        optimizer = pyro.optim.ClippedAdam({"lr": lr})
+        svi = SafeSVI(
+            self.sub_model_log_residuals,
+            self.sub_guide_log_residuals,
+            optimizer,
+            loss=pyro.infer.Trace_ELBO(num_particles=num_particles)
+        )
+        self.to(log_residuals.device)
+        for step in range(n_steps):
+            loss = svi.step(
+                log_residuals, 
+                leaf_cat_to_idx,
+                sigma
+            )
+            if step % 1000 == 0:
+                print(f"[sub-SVI step {step}] loss = {loss:.4f}")
+
+    def correct_fits_intercepts(self, batch_size=128):
+        # Determine the leaf level column dynamically
+        leaf_level_col = 'level_' + str(len(self.level_sizes)-1)
+        adata = self.adata_manager.adata
+        adata.obs[leaf_level_col] = pandas_numericategorical(adata.obs[leaf_level_col].astype(int))
+    
+        device = pyro.param('locs').device
+        self.freeze_encoder = False
+    
+        dataloader = scvi.dataloaders.AnnDataLoader(
+            self.adata_manager,
+            batch_size=batch_size,
+            drop_last=False,
+            shuffle=False,
+            data_and_attributes=self.field_types
+        )
+    
+        self.to(device)
+        self.eval()
+    
+        # Get categories and their lengths
+        discov_cats = adata.obs[self.discov_key].cat.categories
+        leaf_cats = adata.obs[leaf_level_col].cat.categories
+        num_discov = len(discov_cats)
+        num_leaf = len(leaf_cats)
+            
+        # Initialize sums
+        first_batch = True
+        sum_post = None
+        count_post = None
+    
+        has_indices = False
+        for x in dataloader:
+            if 'ind_x' in x.keys():
+                has_indices = True
+            break
+    
+        cell_counter = 0  #tracking global index if no indices are provided
+        # Compute running sums and counts for posterior outputs
+        with torch.no_grad():
+            for qqq, x_dict in enumerate(dataloader):#tqdm.tqdm(dataloader):
+                x = {k: v.to(device) for k, v in x_dict.items()}
+    
+                guide_trace = poutine.trace(self.guide).get_trace(**x)
+                model_trace = poutine.trace(poutine.replay(self.model, trace=guide_trace)).get_trace(**x)
+                batch_posterior_out = model_trace.nodes["_RETURN"]["value"]
+                batch_posterior_out = torch.exp(batch_posterior_out).cpu().numpy()
+    
+                if first_batch:
+                    num_features = batch_posterior_out.shape[1]
+                    sum_post = np.zeros((num_discov, num_leaf, num_features), dtype=np.float64)
+                    count_post = np.zeros((num_discov, num_leaf), dtype=np.float64)
+                    first_batch = False
+    
+                # Get cell indices for this batch
+                if has_indices:
+                    batch_indices = x['ind_x'].cpu().numpy()
+                else:
+                    bsz = batch_posterior_out.shape[0]
+                    batch_indices = np.arange(cell_counter, cell_counter + bsz)
+                    cell_counter += bsz
+    
+                # Map cells to categories
+                discov_codes = adata.obs[self.discov_key].cat.codes[batch_indices].values
+                leaf_codes = adata.obs[leaf_level_col].cat.codes[batch_indices].values
+    
+                for i, (dcv, lfv) in enumerate(zip(discov_codes, leaf_codes)):
+                    sum_post[dcv, lfv, :] += batch_posterior_out[i]
+                    count_post[dcv, lfv] += 1
+    
+        # Compute final posterior means
+        denom = np.maximum(count_post[..., None], 1)
+        posterior_means = sum_post / denom
+        
+        # Compute actual means
+        actual_means, actual_orders = group_aggr_anndata(
+            adata, 
+            [self.discov_key, leaf_level_col], 
+            layer=self.layer, 
+            normalize=True
+        )
+        
+        log_posterior_means = safe_log_transform(posterior_means)
+        log_actual_means = safe_log_transform(actual_means)
+        # seaborn.scatterplot(x=log_actual_means.flatten(), y=log_posterior_means.flatten(),s=0.2,color='black')
+        # plt.show()
+        # Calculate difference to add to discov_di
+        add_to_discov_di = (log_actual_means - log_posterior_means)
+        
+        current_discov_di = pyro.param('discov_di')
+    
+        # Validate category orders
+        posterior_orders = {leaf_level_col: leaf_cats, self.discov_key: discov_cats}
+        discov_cats_post = posterior_orders[self.discov_key]
+    
+        if add_to_discov_di.shape != (num_discov, num_leaf, num_features):
+            print("[ERROR] Shape of add_to_discov_di does not match expected dimensions!")
+            return
+    
+        # Create a new array that covers all categories in discov_di
+        final_add_to_discov_di = np.zeros(current_discov_di.shape, dtype=add_to_discov_di.dtype)
+    
+        non_leaf = np.sum(self.level_sizes[:-1])
+    
+        #ensure leaf_cat_to_idx maps each leaf cat to a correct integer index
+        leaf_cat_to_idx = {cat: cat + non_leaf for i, cat in enumerate(leaf_cats)}
+        
+        for i, cat in enumerate(leaf_cats):
+            print(i,cat)
+            idx = leaf_cat_to_idx[cat]
+            final_add_to_discov_di[:, idx, :] = add_to_discov_di[:, i, :]
+        
+        if current_discov_di.shape != final_add_to_discov_di.shape:
+            raise ValueError("Shape mismatch between current_disocov_di and computed differences.")
+    
+        # Update discov_di
+        with torch.no_grad():
+            updated_di = current_discov_di + torch.tensor(final_add_to_discov_di, device=device).float()
+            updated_di.requires_grad_()
+            pyro.get_param_store().__setitem__('discov_di', updated_di)
+
+        return posterior_means, posterior_orders
+
+
+
 class AntipodeSaveLoadMixin:
     '''Directly taken and modified from scvi-tools base_model and auxiliary functions'''
     def _get_user_attributes(self):
@@ -292,7 +802,10 @@ class AntipodeSaveLoadMixin:
         pyro.get_param_store().load(param_store_path,map_location=device)
         for k in list(pyro.get_param_store()):
             if '$$$' in k:
-                pyro.get_param_store().__delitem__(k)
+                try:
+                    pyro.get_param_store().__delitem__(k)
+                except:
+                    print(k,'not deleted')
         return model
 
     def save(
@@ -361,6 +874,14 @@ class AntipodeSaveLoadMixin:
         
         if save_anndata:
             file_suffix = ""
+            try:
+                self.adata_manager.adata.var.drop('_index',axis=1,inplace=True)
+            except:
+                pass
+            try:
+                self.adata_manager.adata.obs.drop('_index',axis=1,inplace=True)
+            except:
+                pass
             if isinstance(self.adata_manager.adata, AnnData):
                 file_suffix = "adata.h5ad"
             elif isinstance(self.adata_manager.adata, MuData):
