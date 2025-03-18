@@ -5,6 +5,8 @@ from sklearn import cluster
 import pandas as pd
 import scanpy as sc
 import anndata
+from anndata import AnnData
+from mudata import MuData
 import inspect
 import tqdm
 import numpy as np
@@ -19,8 +21,6 @@ import pyro.poutine as poutine
 import pyro.optim
 import re
 import inspect
-from anndata import AnnData
-from mudata import MuData
 from typing import Literal, Optional
 import scvi
 
@@ -34,7 +34,9 @@ from .plotting import *
 class AntipodeTrainingMixin:
     '''
     Mixin class providing functions to actually run ANTIPODE.
-    The naive model trains in 3 phases, first a nonhierarchical block phase to estimate cell type manifolds, then phase 2 learns parameters for a fixed discrete clustering on a fixed latent space for initialization (or supervised). Phase 3 makes all parameters learnable.
+    The naive model trains in 3 phases, first a nonhierarchical fuzzy phase to estimate cell type manifolds. 
+    Then phase 2 learns parameters for a fixed discrete clustering on a fixed latent space for initialization (or supervised). 
+    Phase 3 makes all parameters learnable.
     You can also use supervised taxonomy by providing a clustering as a discrete obsm matrix and training only phase2 with freeze_encoder=False.
     '''
     
@@ -64,7 +66,7 @@ class AntipodeTrainingMixin:
         self.to('cpu')
         self.eval()
         antipode_outs=self.get_antipode_outputs(batch_size=2048,device=device)
-        self.allDone()
+        # self.allDone()
         taxon=antipode_outs[1][0]
         self.adata_manager.adata.obsm[prefix+'X_antipode']=antipode_outs[0][0]
         for i in range(antipode_outs[1][1].shape[1]):
@@ -92,13 +94,16 @@ class AntipodeTrainingMixin:
         
         # Step 1: Prepare to train
         dataset = torch.utils.data.TensorDataset(input_tensor, target_tensor)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True,drop_last=True)
         criterion = torch.nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         
         #Training loop
         for epoch in range(epochs):
             for inputs, targets in dataloader:
+                if inputs.size(0) < 2:
+                    print("Skipping batch of size 1 to avoid BatchNorm issues.")
+                    continue
                 # Forward pass
                 outputs = model(inputs.to(device))
                 loss = criterion(softmax(outputs[0],-1)[:,-targets.shape[-1]:], targets.to(device))
@@ -148,6 +153,7 @@ class AntipodeTrainingMixin:
             new_locs[0,:]=torch.tensor(kmeans_means.mean(0)).float()
         else:
             hierarchy=scipy.cluster.hierarchy.ward(kmeans_means)
+            # scipy.cluster.hierarchy.linkage(kmeans_means,method='average',metric='cityblock')
             level_assignments=[scipy.cluster.hierarchy.cut_tree(hierarchy,n_clusters=x) for x in self.level_sizes]
             adj_means_dict=calculate_layered_tree_means(kmeans_means, level_assignments)
             new_clusts=[adj_means_dict[k][j] for k in adj_means_dict.keys() for j in adj_means_dict[k].keys()]
@@ -159,12 +165,12 @@ class AntipodeTrainingMixin:
             #pyro.get_param_store().__setitem__('edges_'+str(i), pyro.param('edges_'+str(i)).detach()+edge_matrices[i].T)
             pyro.get_param_store().__setitem__('edges_'+str(i), 1e-4 * torch.randn(edge_matrices[i].T.shape,device=device).float() + edge_matrices[i].T.float())
         
-        self.adata_manager.adata.obs[cluster].astype(int)
+        self.adata_manager.adata.obs[cluster].astype(str)
         new_scales=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.std,layer=dimension_reduction,obsm=True)[0]
         new_scales=torch.concatenate(
             [1e-5 * self.scale_init_val * new_locs.new_ones(sum(self.level_sizes[:-1]), pyro.param('locs').shape[1],requires_grad=True),
              torch.tensor(new_scales+1e-10,device=device,requires_grad=True)],axis=0).float()
-        self.adata_manager.adata.obs[cluster].astype(str)
+        
         pyro.get_param_store().__setitem__('locs',new_locs)
         pyro.get_param_store().__setitem__('locs_dynam',1e-5*torch.randn(new_locs.shape,device=new_locs.device))
         pyro.get_param_store().__setitem__('scales',new_scales)
@@ -223,7 +229,7 @@ class AntipodeTrainingMixin:
     def train_phase(self, phase, max_steps, print_every=10000, device='cuda', max_learning_rate=0.001, num_particles=1, one_cycle_lr=True, steps=0, batch_size=32,freeze_encoder=None,print_elbo=False,clip_std=6.0):
         self.scale_factor=1.
         freeze_encoder = True if freeze_encoder is None and phase == 2 else freeze_encoder
-        freeze_encoder = False if freeze_encoder is None else  freeze_encoder
+        freeze_encoder = False if freeze_encoder is None else freeze_encoder
         self.set_freeze_encoder(freeze_encoder) 
         supervised_field_types=self.field_types.copy()
         supervised_fields=self.fields.copy()
@@ -247,49 +253,118 @@ class AntipodeTrainingMixin:
         self.set_approx(phase == 1)
         return self.common_training_loop(dataloader, max_steps, scheduler, svi, print_every, device, steps)
 
+    @classmethod
+    def load_and_recorrect_standard(cls,model_path,batch_size=128,n_steps=None,device='cuda'):
+        '''convenience function for when I change correction code after finishing the model ':)'''
+        adata = sc.read_h5ad(os.path.join(model_path,'p4_adata.h5ad'),backed='r')
+        antipode_model = cls.load(model_path,adata=adata,prefix='p3_',device=device)
+        antipode_model.store_outputs(device=device,prefix='')
+        antipode_model.to(device)
+        if n_steps is not None:
+            posterior_out,posterior_categories = antipode_model.correct_fits(batch_size=batch_size, n_steps = n_steps)
+        else:
+            print('running intercept correction')
+            posterior_out, posterior_categories = antipode_model.correct_fits_intercepts(batch_size=batch_size)
+        antipode_model.store_outputs(device=device,prefix='')
+        return antipode_model
 
-    def run_standard_protocol(self,out_path,max_steps=500000,num_particles=3,device='cuda',max_learning_rate=1e-3,one_cycle_lr=True,batch_size=32):
-        '''Run ANTIPODE from scratch through 3 training phases, followed by parameter correction.'''
-        print('Running phase 1')
-        self.train_phase(phase=1,max_steps=max_steps,
-                         print_every=10000,num_particles=num_particles,
-                         device=device, max_learning_rate=max_learning_rate,
-                         one_cycle_lr=one_cycle_lr, batch_size=batch_size,
-                         clip_std=100.)
+    
+    def run_standard_protocol(self, out_path, max_steps=500000, num_particles=3,
+                              device='cuda', max_learning_rate=1e-3, one_cycle_lr=True, 
+                              batch_size=32, correction_steps=None):
+        # Map phases to checkpoint file paths
+        checkpoint_files = {
+            1: os.path.join(out_path, 'p1_model.pt'),
+            2: os.path.join(out_path, 'p2_model.pt'),
+            3: os.path.join(out_path, 'p3_model.pt'),
+        }
+        # Determine the highest completed phase (default to 0 if none found)
+        last_completed_phase = max(
+            (phase for phase, path in checkpoint_files.items() if os.path.exists(path)), 
+            default=0
+        )
+        leaf_level = 'level_' + str(len(self.level_sizes)-1)
+        print('last completed phase:', last_completed_phase)
+        # Check if p4_adata.h5ad exists; if so, load it and use it for loading the model.
+        p4adata_path = os.path.join(out_path, 'p4_adata.h5ad')
+        if os.path.exists(p4adata_path):
+            # Load the adata exactly as in your manual workflow.
+            try:
+                del self.adata_manager.adata
+                del adata
+            except:
+                pass
+            print("automatically using ",p4adata_path) #weird unsolveable bug when just skipping to 4 below
+            self = self.load_and_recorrect_standard(out_path,batch_size=128, n_steps = correction_steps,device=device) #use this func instead
+            try:
+                self.save(out_path, save_anndata=True, prefix='p4_recorrect_')
+            except Exception as e:
+                print("saving error ocurred:",e)
+            return self
+        else:
+            # Otherwise, use the adata already in the model.
+            adata = self.adata_manager.adata
+    
+        # If a checkpoint exists, load the corresponding model with the chosen adata.
+        if last_completed_phase:
+            self.load(out_path, prefix=f'p{last_completed_phase}_', adata=adata, device=device)
+            print(f"Resuming from phase {last_completed_phase}")
+        else:
+            print("No checkpoints found. Starting training from scratch.")
+
+        # Execute remaining phases
+        if last_completed_phase < 1:
+            # Phase 1
+            print('Running phase 1')
+            self.train_phase(phase=1, max_steps=max_steps, print_every=10000, num_particles=num_particles,
+                             device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
+                             batch_size=batch_size, clip_std=100.)
+            plot_loss(self.losses)
+            self.store_outputs(device=device, prefix='')
+            self.clear_cuda()
+            self.save(out_path, save_anndata=False, prefix='p1_')
         
-        plot_loss(self.losses)
-        self.store_outputs(device=device,prefix='')
-        self.clear_cuda()
-        self.save(out_path,save_anndata=False,prefix='p1_')
+        if last_completed_phase < 2:
+            # Phase 2
+            print('Running phase 2')
+            self.store_outputs(device=device, prefix='')
+            self.prepare_phase_2(epochs=2, device=device, dimension_reduction='X_antipode')
+            self.train_phase(phase=2, max_steps=int(max_steps/2), print_every=10000, num_particles=num_particles,
+                             device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
+                             batch_size=batch_size, freeze_encoder=True, clip_std=100.)
+            plot_loss(self.losses)
+            self.store_outputs(device=device, prefix='')
+            self.clear_cuda()
+            self.save(out_path, save_anndata=False, prefix='p2_')
         
-        print('Running phase 2')
-        self.prepare_phase_2(epochs=2,device=device,dimension_reduction='X_antipode')
-        self.train_phase(phase=2,max_steps=int(max_steps/2),
-                         print_every=10000,num_particles=num_particles,
-                         device=device, max_learning_rate=max_learning_rate, 
-                         one_cycle_lr=one_cycle_lr,batch_size=batch_size,
-                         freeze_encoder=True,clip_std=100.)
-        
-        plot_loss(self.losses)
-        self.store_outputs(device=device,prefix='')
-        self.clear_cuda()
-        self.save(out_path,save_anndata=False,prefix='p2_')
-        
-        print('Running phase 3')
-        self.train_phase(phase=3,max_steps=max_steps,
-                         print_every=10000,num_particles=num_particles,
-                         device=device, max_learning_rate=max_learning_rate, 
-                         one_cycle_lr=one_cycle_lr, batch_size=batch_size,clip_std=100)
-        
-        plot_loss(self.losses)
-        self.store_outputs(device=device,prefix='')
-        self.clear_cuda()
-        self.save(out_path,save_anndata=False,prefix='p3_')
+        if last_completed_phase < 3:
+            # Phase 3
+            print('Running phase 3')
+            self.store_outputs(device=device, prefix='')
+            self.train_phase(phase=3, max_steps=max_steps, print_every=10000, num_particles=num_particles,
+                             device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
+                             batch_size=batch_size, clip_std=100)
+            plot_loss(self.losses)
+            self.store_outputs(device=device, prefix='')
+            self.clear_cuda()
+            self.save(out_path, save_anndata=True, prefix='p3_')
+            self.to(device)
         self.to(device)
+        self.eval()
+        self.store_outputs(device=device, prefix='')#Cheap and just for safety
+        # Final correction (always run after phase 3)
         print('Running final correction')
-        posterior_out,posterior_categories = self.correct_fits(batch_size=batch_size, n_steps = 100000)
-        self.store_outputs(device=device,prefix='')
-        self.save(out_path,save_anndata=True,prefix='p4_')
+        if correction_steps is not None:
+            posterior_out, posterior_categories = self.correct_fits(batch_size=128, n_steps=correction_steps,num_particles=num_particles)
+        else:
+            posterior_out, posterior_categories = self.correct_fits_intercepts(batch_size=128)
+            
+        self.store_outputs(device=device, prefix='')
+        try:
+            self.save(out_path, save_anndata=True, prefix='p4_')
+        except Exception as e:
+            print("saving error ocurred:",e)
+        return self
     
     def allDone(self):
         print("Finished training!")
@@ -315,7 +390,7 @@ class AntipodeTrainingMixin:
             exc_type, exc_value, exc_traceback = sys.exc_info()
             traceback.clear_frames(exc_traceback)
 
-    def calculate_cluster_params(self, flavor:['torch','numpy'] = 'numpy',prefix=''):
+    def calculate_cluster_params(self, flavor:['torch','numpy'] = 'numpy',prefix='',cluster_count_threshold=50):
         adata = self.adata_manager.adata
         leaf_level = 'level_' + str(len(self.level_sizes)-1)
         if flavor == 'torch':
@@ -367,7 +442,8 @@ class AntipodeTrainingMixin:
             prop_discov_di = np.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
             prop_discov_dm = np.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
             discov_cluster_params=(np.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+np.expand_dims(pstore['discov_constitutive_de'],1)))-pstore['softmax_shift']
-            return discov_cluster_params,cluster_params, cluster_labels,var_labels,(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm)
+            zero_mask = (adata.obs.groupby(self.discov_key)[leaf_level].value_counts().unstack().loc[:,cluster_labels]>=cluster_count_threshold).to_numpy()
+            return discov_cluster_params,cluster_params, cluster_labels,var_labels, 1/zero_mask[...,np.newaxis],(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm)
     
     def sub_model_log_residuals(
         self,
@@ -657,11 +733,19 @@ class AntipodeTrainingMixin:
                 print(f"[sub-SVI step {step}] loss = {loss:.4f}")
 
     def correct_fits_intercepts(self, batch_size=128):
-        # Determine the leaf level column dynamically
         leaf_level_col = 'level_' + str(len(self.level_sizes)-1)
         adata = self.adata_manager.adata
         adata.obs[leaf_level_col] = pandas_numericategorical(adata.obs[leaf_level_col].astype(int))
-    
+        self.save_params_to_uns(prefix='precorrect_')
+        loc_shift = pyro.param('discov_dm').mean(0)
+        pyro.get_param_store().__setitem__('locs',(pyro.param('locs')+loc_shift).detach().clone())
+        pyro.get_param_store().__setitem__('discov_dm',(pyro.param('discov_dm')-loc_shift).detach().clone())
+        pyro.get_param_store().__setitem__('cluster_intercept',(pyro.param('cluster_intercept')+pyro.param('discov_di').mean(0)).detach().clone())
+        pyro.get_param_store().__setitem__('discov_di',(pyro.param('discov_di')-pyro.param('discov_di').mean(0)).detach().clone())
+        pyro.get_param_store().__setitem__('z_decoder_weight',(pyro.param('z_decoder_weight')+pyro.param('discov_dc').mean(0)).detach().clone())
+        pyro.get_param_store().__setitem__('discov_dc',(pyro.param('discov_dc')-pyro.param('discov_dc').mean(0)).detach().clone())
+        self.save_params_to_uns()
+                                           
         device = pyro.param('locs').device
         self.freeze_encoder = False
     
@@ -696,7 +780,7 @@ class AntipodeTrainingMixin:
         cell_counter = 0  #tracking global index if no indices are provided
         # Compute running sums and counts for posterior outputs
         with torch.no_grad():
-            for qqq, x_dict in enumerate(dataloader):#tqdm.tqdm(dataloader):
+            for qqq, x_dict in enumerate(tqdm.tqdm(dataloader)):#tqdm.tqdm(dataloader):
                 x = {k: v.to(device) for k, v in x_dict.items()}
     
                 guide_trace = poutine.trace(self.guide).get_trace(**x)
@@ -731,15 +815,14 @@ class AntipodeTrainingMixin:
         posterior_means = sum_post / denom
         
         # Compute actual means
-        actual_means, actual_orders = group_aggr_anndata(
-            adata, 
-            [self.discov_key, leaf_level_col], 
-            layer=self.layer, 
-            normalize=True
-        )
+        actual_aggr=group_aggr_anndata(adata,[self.discov_key,leaf_level_col],layer=self.layer,normalize=True)
+        sum_aggr=group_aggr_anndata(adata,[leaf_level_col],layer=self.layer,normalize=False,agg_func=np.sum)
+        actual_means = actual_aggr[0]
+        actual_orders = actual_aggr[1][leaf_level_col]
+        actual_sums = sum_aggr[0].sum(-1)[np.newaxis,...,np.newaxis]
+        log_actual_means=safe_log_transform(actual_means,actual_sums)
         
-        log_posterior_means = safe_log_transform(posterior_means)
-        log_actual_means = safe_log_transform(actual_means)
+        log_posterior_means = safe_log_transform(posterior_means)#,actual_sums
         # seaborn.scatterplot(x=log_actual_means.flatten(), y=log_posterior_means.flatten(),s=0.2,color='black')
         # plt.show()
         # Calculate difference to add to discov_di
@@ -764,7 +847,6 @@ class AntipodeTrainingMixin:
         leaf_cat_to_idx = {cat: cat + non_leaf for i, cat in enumerate(leaf_cats)}
         
         for i, cat in enumerate(leaf_cats):
-            print(i,cat)
             idx = leaf_cat_to_idx[cat]
             final_add_to_discov_di[:, idx, :] = add_to_discov_di[:, i, :]
         
@@ -778,7 +860,6 @@ class AntipodeTrainingMixin:
             pyro.get_param_store().__setitem__('discov_di', updated_di)
 
         return posterior_means, posterior_orders
-
 
 
 class AntipodeSaveLoadMixin:
@@ -882,6 +963,10 @@ class AntipodeSaveLoadMixin:
                 self.adata_manager.adata.obs.drop('_index',axis=1,inplace=True)
             except:
                 pass
+            try:
+                self.adata_manager.adata.raw.var.drop('_index',axis=1,inplace=True)
+            except:
+                pass            
             if isinstance(self.adata_manager.adata, AnnData):
                 file_suffix = "adata.h5ad"
             elif isinstance(self.adata_manager.adata, MuData):
@@ -911,6 +996,7 @@ class AntipodeSaveLoadMixin:
         load_adata: bool,
         prefix: Optional[str] = None,
         is_mudata = False,
+        device = 'cpu',
         load_kw_args = {'backed':'r'}
     ) -> tuple[dict, np.ndarray, dict, AnnData]:
         """Helper to load saved files."""
@@ -919,7 +1005,7 @@ class AntipodeSaveLoadMixin:
         model_file_name = f"{file_name_prefix}model.pt"
         model_path = os.path.join(dir_path, model_file_name)
         try:
-            model = torch.load(model_path)
+            model = torch.load(model_path,map_location=device,weights_only=False)# used to be default weights_only=False
         except FileNotFoundError as exc:
             raise ValueError(
                 f"Failed to load model file at {model_path}. "
@@ -993,6 +1079,7 @@ class AntipodeSaveLoadMixin:
             dir_path,
             load_adata,
             prefix=prefix,
+            device=device,
             is_mudata=is_mudata,
             load_kw_args=load_kw_args,
         )
@@ -1007,6 +1094,8 @@ class AntipodeSaveLoadMixin:
         #,os.path.join(dir_path,'antipode.paramstore')
         #model._validate_anndata(adata)
         return model
+
+
 
 
 #########DEBUGGING########
@@ -1168,3 +1257,4 @@ class Print_Trace_ELBO(ELBO):
                 surrogate_loss_particle.backward(retain_graph=self.retain_graph)
         warn_if_nan(loss, "loss")
         return loss
+

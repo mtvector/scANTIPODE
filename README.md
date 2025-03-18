@@ -1,8 +1,8 @@
 <h1 style="text-align: center;"> scANTIPODE</h1>
 
-<div align="center">
+[<div align="center">
   <img src="assets/antipode_logo_alternate.png" alt="antipode logo!" width="200">
-</div>
+</div>]("https://en.wikipedia.org/wiki/Antipodes")
 
 
 **NOTICE: This package will be under heavy development until publication, and will be subject to changes until release 0.1**
@@ -30,17 +30,9 @@ First create a conda environment with python >= 3.10
 git clone git@github.com:mtvector/scANTIPODE.git
 #cuda 11.7 should work too
 conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-# Or for fun visualization mamba create -n rapids-24.12 -c rapidsai -c conda-forge -c nvidia rapids=24.12 python=3.12 'cuda-version>=12.0,<=12.5' 'pytorch=*=*cuda*'
 conda install jax jaxlib -c conda-forge
 cd scANTIPODE
 pip install -e .
-
-Instead of separately installing pytorch, I recommend a full [RAPIDS install](https://docs.rapids.ai/install/#selector), as this should provide a robust environmnet setup and give you access access to tool like GPU accellerated UMAP kkk
-
-conda create -n rapids-24.12 -c rapidsai -c conda-forge -c nvidia  \
-    rapids=24.12 python=3.12 'cuda-version>=12.0,<=12.5' \
-    'pytorch=*=*cuda*'
-
 
 Additional analysis stuff
 
@@ -48,17 +40,26 @@ pip install gseapy liana
 
 ```
 
+Instead of separately installing pytorch, lately I've favored a full [RAPIDS install](https://docs.rapids.ai/install/#selector), as this should provide a robust environmnet setup and give you access access to fun tools like GPU accellerated UMAP.
+
+```
+# So in place of: conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+conda create -n antipode -c rapidsai -c conda-forge -c nvidia  \
+    rapids=24.12 python=3.12 'cuda-version>=12.0,<=12.5' \
+    'pytorch=*=*cuda*'
+```
+
 
 Please reach out to let me know if you try ANTIPODE on a dataset and it works (or doesn't work)... The model is (forever) a work in process!
 
 Note that the model can be VRAM hungry, with parameters scaling by #covariates x #genes x #clusters|#modules... if you run out of vram, you might need to 1. fix a
-GPU memory leak, 2. use fewer genes/latent dimensions/cluster, 3. get a bigger GPU
+GPU memory leak, 2. use fewer genes/latent dimensions/clusters/particles, 3. get a bigger GPU
 
 ## Coming hopefully soon
-- Improved plotting functionality
+- ~~.Improved plotting functionality~~.
 - Expanded tutorials
 - PyPI release
-- Gene expression histogram normalization
+- ~~.Gene expression histogram normalization~~.
 - Phylogeny regression
 
 ## Unknown timeline challenges to take on

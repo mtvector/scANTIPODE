@@ -196,10 +196,19 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
     
     return result, category_orders
 
-
-def safe_log_transform(x):
-    nonzero = x[x > 0]
-    offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10
+def get_real_leaf_means(adata,discov_key,leaf_key,layer=None):
+    '''convenience function wraps aggregation and safe_log_transform. Returns [discov_levels,leaf_clusters,genes] array of log means'''
+    aggr_means=group_aggr_anndata(adata,[discov_key,leaf_key],layer=layer,normalize=True)
+    aggr_sums=group_aggr_anndata(adata,[leaf_key],layer=layer,normalize=False,agg_func=np.sum)
+    log_real_means=safe_log_transform(aggr_means[0],aggr_sums[0].sum(-1)[np.newaxis,...,np.newaxis])
+    return log_real_means, aggr_means[1]
+    
+def safe_log_transform(x, sums=None):
+    if sums is not None:
+        offset = 0.5 / (sums+1.) #naive expected value halfway between smallest observable value and 0
+    else:
+        nonzero = x[x > 0]
+        offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10 #Sets to just below lowest observed value in dataset (extreme)
     return np.log(x + offset)
 
 def pandas_numericategorical(col):

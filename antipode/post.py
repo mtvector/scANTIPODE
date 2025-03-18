@@ -1,10 +1,140 @@
 import pandas as pd
+import scanpy as sc
+import os
 import scipy
 import numpy as np
 import tqdm
 from . import plotting
+from .antipode_model import ANTIPODE
 
-def get_quantile_markers(df,q=0.95,threshold=-9999999.):
+def select_marker_genes(marker_df, expr_df, threshold, marker=True, other_quantile=0.95):
+    """
+    Select marker or antimarker genes for each cluster.
+
+    For marker==True (markers):
+      - marker_df should be computed with a high quantile (e.g. 0.95 or 0.99).
+      - For each cluster, genes are sorted in descending order (largest difference first).
+      - The function returns the first gene whose expression in the cluster exceeds `threshold`.
+      - If none pass, the top-ranked gene is returned.
+
+    For marker==False (antimarkers):
+      - marker_df should be computed with a low quantile (e.g. 0.1).
+      - Genes are sorted in ascending order (lowest difference first).
+      - For each candidate gene, the expression in all other clusters is examined.
+      - If `other_threshold` is provided, the gene is chosen only if the specified quantile
+        (default 0.95) of its expression in the other clusters exceeds `other_threshold`.
+      - If no gene meets this filter, the top candidate (i.e. the gene with the minimum score)
+        is returned.
+    
+    :param marker_df: DataFrame from get_quantile_markers (clusters as rows, genes as columns).
+    :param expr_df: DataFrame of the original expression values (clusters as rows, genes as columns).
+    :param threshold: In 'marker' mode, the minimum expression required in the target cluster.
+                      In 'antimarker' mode, not used.
+    :param marker: Boolean to use markers or antimarker strategy
+    :param other_quantile: In 'antimarker' mode, the quantile of the non-target clusters’ expression to consider.
+    :return: Dictionary mapping cluster -> selected gene.
+    """
+    selected_markers = {}
+    clusters = marker_df.index
+
+    for cluster in clusters:
+        if marker:
+            # For markers, higher score is better.
+            sorted_genes = marker_df.loc[cluster].sort_values(ascending=False)
+            top_gene = sorted_genes.index[0]
+            chosen_gene = None
+            for gene in sorted_genes.index:
+                if expr_df.loc[cluster, gene] > threshold:
+                    chosen_gene = gene
+                    break
+            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
+
+        else:
+            # For antimarkers, lower score is better.
+            sorted_genes = marker_df.loc[cluster].sort_values(ascending=True)
+            top_gene = sorted_genes.index[0]
+            chosen_gene = None
+            # Identify the other clusters
+            other_clusters = expr_df.index.difference([cluster])
+            for gene in sorted_genes.index:
+                other_expr = expr_df.loc[other_clusters, gene]
+                # If no threshold is provided, pick the top candidate.
+                # Otherwise, require that a high quantile of expression in others exceeds the threshold.
+                if (threshold is None) or (np.quantile(other_expr, other_quantile) > threshold):
+                    chosen_gene = gene
+                    break
+            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
+
+    return selected_markers
+
+def moving_average_values(x,y,window_size=1001):
+    moving_average = antipode.plotting.moving_average(y[np.argsort(x)],window_size)
+    return(np.sort(x[int(window_size/2):-int(window_size/2)]),moving_average)
+    
+def moving_average(x, w):
+    return np.convolve(x, np.ones(w), 'valid') / w
+
+def select_marker_genes(marker_df, expr_df, threshold, marker=True, other_quantile=0.95):
+    """
+    Select marker or antimarker genes for each cluster.
+
+    For marker==True (markers):
+      - marker_df should be computed with a high quantile (e.g. 0.95 or 0.99).
+      - For each cluster, genes are sorted in descending order (largest difference first).
+      - The function returns the first gene whose expression in the cluster exceeds `threshold`.
+      - If none pass, the top-ranked gene is returned.
+
+    For marker==False (antimarkers):
+      - marker_df should be computed with a low quantile (e.g. 0.1).
+      - Genes are sorted in ascending order (lowest difference first).
+      - For each candidate gene, the expression in all other clusters is examined.
+      - If `other_threshold` is provided, the gene is chosen only if the specified quantile
+        (default 0.95) of its expression in the other clusters exceeds `other_threshold`.
+      - If no gene meets this filter, the top candidate (i.e. the gene with the minimum score)
+        is returned.
+    
+    :param marker_df: DataFrame from get_quantile_markers (clusters as rows, genes as columns).
+    :param expr_df: DataFrame of the original expression values (clusters as rows, genes as columns).
+    :param threshold: In 'marker' mode, the minimum expression required in the target cluster.
+                      In 'antimarker' mode, not used.
+    :param marker: Boolean to use markers or antimarker strategy
+    :param other_quantile: In 'antimarker' mode, the quantile of the non-target clusters’ expression to consider.
+    :return: Dictionary mapping cluster -> selected gene.
+    """
+    selected_markers = {}
+    clusters = marker_df.index
+
+    for cluster in clusters:
+        if marker:
+            # For markers, higher score is better.
+            sorted_genes = marker_df.loc[cluster].sort_values(ascending=False)
+            top_gene = sorted_genes.index[0]
+            chosen_gene = None
+            for gene in sorted_genes.index:
+                if expr_df.loc[cluster, gene] > threshold:
+                    chosen_gene = gene
+                    break
+            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
+
+        else:
+            # For antimarkers, lower score is better.
+            sorted_genes = marker_df.loc[cluster].sort_values(ascending=True)
+            top_gene = sorted_genes.index[0]
+            chosen_gene = None
+            # Identify the other clusters
+            other_clusters = expr_df.index.difference([cluster])
+            for gene in sorted_genes.index:
+                other_expr = expr_df.loc[other_clusters, gene]
+                # If no threshold is provided, pick the top candidate.
+                # Otherwise, require that a high quantile of expression in others exceeds the threshold.
+                if (threshold is None) or (np.quantile(other_expr, other_quantile) > threshold):
+                    chosen_gene = gene
+                    break
+            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
+
+    return selected_markers
+
+def get_quantile_markers(df,q=0.95):
     """
     Get the markers for the rows of a dataframe.
 
@@ -16,9 +146,27 @@ def get_quantile_markers(df,q=0.95,threshold=-9999999.):
     coefs=[]
     for i in tqdm.tqdm(range(df.shape[0])):
         others=list(set(list(range(df.shape[0])))-set([i]))
-        coefs.append((df_array[i:(i+1),:]-np.quantile(df_array[others,:],q,axis=0)))#/(cluster_params.std(0)+cluster_params.std(0).mean()))
+        coefs.append((df_array[i:(i+1),:]-np.nanquantile(df_array[others,:],q,axis=0)))#/(cluster_params.std(0)+cluster_params.std(0).mean()))
     coefs=np.concatenate(coefs,axis=0)
     marker_df=pd.DataFrame(coefs,index=df.index,columns=df.columns)
+    return(marker_df)
+
+def get_conserved_quantile_markers(exprs,index,columns,q=0.95,antimarker=False):
+    """
+    Get the conserved markers for axis 1 of mean expression tensor.
+
+    :param df: GEX means where rows are categories and columns are named features.
+    :param q: Quantile of mean to subtract.
+    :return: A matrix which has the difference of each gene in each cluster vs the quantile value in all other clusters.
+    """
+    direction_operation = np.max if antimarker else np.min
+    coefs=[]
+    for i in tqdm.tqdm(range(exprs.shape[1])):
+        others=list(set(list(range(exprs.shape[1])))-set([i]))
+        diff_from_quantile = exprs[:,i,:]-np.nanquantile(exprs[:,others,:],q,axis=1)
+        coefs.append(direction_operation(diff_from_quantile,axis=0))#/(cluster_params.std(0)+cluster_params.std(0).mean()))
+    coefs_cat=np.stack(coefs,axis=0)
+    marker_df=pd.DataFrame(coefs_cat,index=index,columns=columns)
     return(marker_df)
 
 def get_n_largest(n):

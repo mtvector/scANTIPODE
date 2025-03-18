@@ -47,7 +47,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     psi_levels (list of bool): Whether or not to allow a psi at each level of the layered tree. Should be 1. (all levels) or a list of len(level_sizes)
     
     num_latent (int): The number of latent dimensions to model. Defaults to 50.
-    num_batch_embed (int): Number of embedding dimensions for batch effects. Defaults to 10. 
+    num_batch_embed (int): Number of embedding dimensions for batch effects. Defaults to 2. 
     scale_factor (float, optional): Factor for scaling the data normalization. Inferred from data if None. [DANGER]
     prior_scale (float): Scale for the Laplace prior distributions. Defaults to 100. [DANGER]
     dcd_prior (float, optional): Scale for discov_constitutive_de. Use this for missing genes (set to large negative value and rest 0. Zeros if None.
@@ -56,16 +56,16 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     dist_normalize (bool): EXPERIMENTAL. Whether to apply distance normalization. Defaults to False.
     z_transform (pytorch function): Function to be applied to latent space (Z) e.g. centered_sigmoid, sigmoid. This will mess up DE Parameter scaling.
     loc_as_param, zdw_as_param, intercept_as_param (bool): Flags for using location, Z decoder weight, and intercept as parameters instead (maximum likelihood inference instead of Laplace MAP), respectively. All default to False.
-    theta_prior (float): Initial value for the inverse dispersion of the negative binomial. Defaults to 50. [DANGER]
+    theta_prior (float): Initial value for the inverse dispersion of the negative binomial. Defaults to 10. [DANGER]
     scale_init_val (float): Initial value for scaling parameters in phase 1. Defaults to 0.01. [DANGER]
     classifier_hidden, encoder_hidden, batch_embedder_hidden (list of int): Sizes of hidden layers for the classifier, encoder and batch embedding networks, respectively.
     sampler_category (string): Obs categorical column which will be used with the dataloader to sample each category with equal probability. (suggested use is the discov category)
     """
 
     def __init__(self, adata, discov_pair, batch_pair, layer, seccov_key='seccov_dummy', level_sizes=[1,10,100],
-                 num_latent=50,scale_factor=None, prior_scale=100,dcd_prior=None,use_psi=True,sampler_category=None,
-                 loc_as_param=True,zdw_as_param=True,intercept_as_param=True,seccov_as_param=True,use_q_score=True,psi_levels=[True],
-                 num_batch_embed=10,theta_prior=50.,min_theta=1.,scale_init_val=0.01,bi_depth=2,dist_normalize=False,z_transform=None,
+                 num_latent=50, scale_factor=None, prior_scale=100, dcd_prior=None, sampler_category=None, theta_prior=10.,
+                 loc_as_param=True,zdw_as_param=True, intercept_as_param=False, seccov_as_param=True,use_q_score=False, use_psi=True, psi_levels=[True],
+                 num_batch_embed=2,  min_theta=1e-1, scale_init_val=0.01, bi_depth=2, z_transform=None, dist_normalize=False,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500]):
 
         pyro.clear_param_store()

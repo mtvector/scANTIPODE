@@ -1,12 +1,18 @@
+import warnings
+import numpy as np
 from . import model_distributions
 from .model_distributions import *
 from . import model_functions
 from .model_functions import *
-import pyro
-import pyro.distributions as dist
-from pyro import poutine
+from . import train_utils
+from .train_utils import *
 import torch
 from torch.distributions import constraints
+import pyro
+import pyro.distributions as dist
+from pyro.infer import TracePosterior, ELBO
+from pyro import poutine
+
 import contextlib
 from contextlib import ExitStack, contextmanager
 
@@ -109,7 +115,6 @@ class MAPHalfCauchyModule(MMB):
             return pyro.sample(self.param_name+'_sample',dist.Delta(p).to_event(self.dependent_dim))
 
 
-
 class TreeEdges(MMB):
     def __init__(self, model,straight_through=True,zeros=True):
         super().__init__(model)
@@ -208,12 +213,7 @@ class TreeConvergenceBottomUp(MMB):
         results=results[::-1]
         return(results)
 
-import torch
-import pyro
-from pyro.infer import TracePosterior, ELBO
-from pyro import poutine
-import warnings
-import numpy as np
+
 
 def torch_item(x):
     """A helper function to extract the item from a tensor."""
@@ -307,48 +307,109 @@ class SafeSVI(TracePosterior):
     
         return loss_val
 
+class ZLEncoder(nn.Module):
+    '''
+    Takes tensor of size (batch,num_var) input (for now)
 
-class TreeConvergence(MMB):
-    '''deprecated'''
-    def __init__(self, model,strictness=1.):
-        super().__init__(model)
-        self.strictness=strictness
+        Args:
+        num_var (integer): size of input variables (e.g. number of genes)
+        outputs ([(),()]): example [(self.z_dim,None),(self.z_dim,softplus),(1,None),(1,softplus),(1,None),(1,softplus)]
+        hidden_dims ([integer]) 
+    '''
+    def __init__(self, num_var, outputs, hidden_dims=[],num_cat_input=0,hidden_conv_channels=4,conv_out_channels=1):
+        super().__init__()
+        self.num_cat_input=num_cat_input
+        self.output_dim=[x[0] for x in outputs] 
+        self.output_transform=[x[1] for x in outputs]
+        self.cumsums=np.cumsum(self.output_dim)
+        self.cumsums=np.insert(self.cumsums,0,0)
+        self.dims = [conv_out_channels*num_var+self.num_cat_input+1] + hidden_dims + [self.cumsums[-1]]
+        self.fc = make_fc(self.dims,dropout=True)
 
-    def model_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
-        if strictness is None:
-            strictness=self.strictness
-        #In the model sample up from the leaves of y1 but use ideal propagated values
-        levels=[y1[...,self.model.level_indices[i]:self.model.level_indices[i+1]] for i in range(len(self.model.level_sizes))]
-        result=levels[-1]
-        results=[result]
-        #Propagate from bottom to top
-        for i in range(len(self.model.level_sizes) - 2, -1, -1):
-            result=levels[i+1]@level_edges[i]
-            results.append(result)
-        results=results[::-1]
-        with poutine.scale(scale=strictness):
-            for i in range(len(self.model.level_sizes)):
-                pyro.sample('y_level_'+str(i),dist.Laplace(results[i],s.new_ones(results[i].shape)).to_event(1))
+    def forward(self, s,species=None):
+        # Transform the counts x to log space for increased numerical stability.
+        # Note that we only use this transformation here; in particular the observation
+        # distribution in the model is a proper count distribution.
+        s_sum=torch.log(1 + s.sum(-1).unsqueeze(-1))
+        s = torch.log(1 + s)
+        if species is None:
+            x=self.fc(torch.cat([s,s_sum],dim=-1))
+        else:
+            x=self.fc(torch.cat([s,species,s_sum],dim=-1))
+        return_list=[]
+        for i in range(len(self.cumsums)-1):
+            if self.output_transform[i] is None:
+                return_list.append(x[:,self.cumsums[i]:self.cumsums[i+1]])
+            else:
+                return_list.append(self.output_transform[i](x[:,self.cumsums[i]:self.cumsums[i+1]]))
+        return(return_list)    
+    
+class ZDecoder(nn.Module):
+    '''
+    Empty class that uses provided weights to multiply by z.
+    '''
+    def __init__(self, num_latent ,num_var, hidden_dims=[]):
+        super().__init__()
         
-            #Tree root prior is just a cost function (1 means no graph cycles,0 disconnected, >1 indicates cycles)
-            pyro.sample('tree_root',dist.Laplace(s.new_ones(1,1),s.new_ones(1,1)).to_event(1))
-        return(results)
-        
-    def guide_sample(self,y1,level_edges,s=torch.ones(1),strictness=None):
-        if strictness is None:
-            strictness=self.strictness
-        #In the guide, sample up y1, no edge propagation
-        levels=[y1[...,self.model.level_indices[i]:self.model.level_indices[i+1]] for i in range(len(self.model.level_sizes))]
-        with poutine.scale(scale=strictness):
-            for i in range(len(self.model.level_sizes)):
-                pyro.sample('y_level_'+str(i),dist.Delta(levels[i]).to_event(1))
+    def forward(self,z,weight,delta=None):
+        if delta is None:
+            mu=torch.einsum('bi,ij->bj',z,weight)
+        else:
+            mu=torch.einsum('bi,bij->bj',z,weight+delta)
+        return mu     
 
-            #But still need to propagate edges to get the root value (check for cycles)
-            results=[levels[-1]]
-            for i in range(len(self.model.level_sizes) - 2, -1, -1):
-                result=levels[i+1]@level_edges[i]
-                results.append(result)
-            results=results[::-1]
-            pyro.sample('tree_root',dist.Delta(results[0]).to_event(1))
-        return(results)
 
+class Classifier(nn.Module):
+    '''
+    Simple FFNN with output splitting
+    '''
+    def __init__(self, num_latent, outputs,hidden_dims=[2000,2000,2000]):
+        super().__init__()
+        self.output_dim=[x[0] for x in outputs] 
+        self.output_transform=[x[1] for x in outputs]
+        self.cumsums=np.cumsum(self.output_dim)
+        self.cumsums=np.insert(self.cumsums,0,0)
+        self.dims = [num_latent] + hidden_dims + [self.cumsums[-1]]
+        self.fc = make_fc(self.dims,dropout=False)
+
+    def forward(self, z):
+        x=self.fc(z)
+        return_list=[]
+        for i in range(len(self.cumsums)-1):
+            if self.output_transform[i] is None:
+                return_list.append(x[:,self.cumsums[i]:self.cumsums[i+1]])
+            else:
+                return_list.append(self.output_transform[i](x[:,self.cumsums[i]:self.cumsums[i+1]]))
+        return(return_list)   
+
+
+class SimpleFFNN(nn.Module):
+    '''Basic feed forward neural network'''
+    def __init__(self, in_dim, hidden_dims, out_dim):
+        super().__init__()
+        dims = [in_dim] + hidden_dims + [out_dim]
+        self.fc = make_fc(dims,dropout=True)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+class TGeN(nn.Module):
+    '''Trajectory Generator Network'''
+    def __init__(self, in_dim, hidden_dim):
+        super().__init__()
+        self.linear1=nn.Linear(in_dim, hidden_dim,bias=True)
+        self.relu=nn.ReLU()
+        self.bn1=torch.nn.BatchNorm1d(hidden_dim)
+        self.bn2=torch.nn.BatchNorm1d(hidden_dim)
+        #self.bn3=torch.nn.BatchNorm1d(hidden_dim)
+        self.conv1=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=1)
+        self.conv2=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=1)
+        #self.conv3=nn.Conv1d(hidden_dim,hidden_dim,kernel_size=(1,), stride=(1,),bias=True,groups=hidden_dim)
+
+    def forward(self, x,out_weights=None):
+        x=self.relu(self.bn1(self.linear1(x)))
+        x=self.relu(self.conv1(x.unsqueeze(-1)).squeeze())#
+        x=self.bn2(self.conv2(x.unsqueeze(-1)).squeeze())
+        #x=self.bn3(self.conv3(x.unsqueeze(-1)).squeeze())
+        return x

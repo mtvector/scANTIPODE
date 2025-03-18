@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import tqdm
 import scanpy as sc
 import sklearn
+import os
+
 from . import model_functions
 try:
     import gseapy
@@ -17,6 +19,11 @@ except:
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'valid') / w
 
+def moving_average_values(x,y,window_size=1001):
+    ma = moving_average(y[np.argsort(x)],window_size)
+    return(np.sort(x[int(window_size/2):-int(window_size/2)]),ma)
+    
+    
 def plot_loss(loss_tracker):
     '''Plots vector of values along with moving average'''
     seaborn.scatterplot(x=list(range(len(loss_tracker))),y=loss_tracker,alpha=0.5,s=2)
@@ -68,78 +75,222 @@ def clip_latent_dimensions(matrix, x):
 
     return clipped_matrix
 
-def plot_batch_embedding_pca(antipode_model):
+def plot_batch_embedding_pca(antipode_model,color_key=None, save=False):
+    """Plot PCA of batch embeddings; save as SVG if save is True."""
     try:
-        pca=sklearn.decomposition.PCA(n_components=2)
-        batch_eye=torch.eye(antipode_model.num_batch)
-        batch_pca=pca.fit_transform(model_functions.centered_sigmoid(antipode_model.be_nn.cpu()(batch_eye)).detach().numpy())
-        df=pd.DataFrame(batch_pca)
-        batch_species=antipode_model.adata_manager.adata.obs.groupby(antipode_model.batch_key)['species'].value_counts().unstack().idxmax(axis=1).to_dict()
-        
-        df[antipode_model.batch_key]=antipode_model.adata_manager.adata.obs[antipode_model.batch_key].cat.categories
-        df[antipode_model.discov_key]=[batch_species[x] for x in antipode_model.adata_manager.adata.obs[antipode_model.batch_key].cat.categories]
-        seaborn.scatterplot(df,x=0,y=1,hue='species')
+        if color_key is None:
+            color_key = antipode_model.discov_key
+        colors = antipode_model.adata_manager.adata.uns[color_key + '_colors']        
+        pca = sklearn.decomposition.PCA(n_components=2)
+        batch_eye = torch.eye(antipode_model.num_batch)
+        batch_pca = pca.fit_transform(
+            model_functions.centered_sigmoid(antipode_model.be_nn.cpu()(batch_eye))
+            .detach().numpy()
+        )
+        df = pd.DataFrame(batch_pca)
+        batch_species = (antipode_model.adata_manager.adata.obs
+                         .groupby(antipode_model.batch_key)[color_key]
+                         .value_counts()
+                         .unstack()
+                         .idxmax(axis=1)
+                         .to_dict())
+
+        batches = antipode_model.adata_manager.adata.obs[antipode_model.batch_key].cat.categories
+        df[antipode_model.batch_key] = batches
+        df[color_key] = [batch_species[x] for x in batches]
+        df[color_key] = df[color_key].astype('category')
+        df[color_key] = df[color_key].cat.reorder_categories(antipode_model.adata_manager.adata.obs[color_key].cat.categories)
+        seaborn.scatterplot(data=df, x=0, y=1, hue=color_key,palette = colors)
         plt.xlabel('batch embedding PC1')
         plt.ylabel('batch embedding PC2')
-        return(df)
-    except:
-        print('plot failed')
+        if save:
+            filename = os.path.join(sc.settings.figdir, 'plot_batch_embedding_pca_'+color_key+'.svg')
+            plt.savefig(filename, format='svg')
+            plt.show()
+        else:
+            plt.show()
+        return df
+    except Exception as e:
+        print('plot failed:', e)
 
-def plot_d_hists(antipode_model):
-    """plot deltas from antipode model parameters"""
-    categories=antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['categorical_mapping']
-    colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
-    param_store=antipode_model.adata_manager.adata.uns['param_store']
+import os
+import matplotlib.pyplot as plt
+
+def plot_d_hists(antipode_model, bins=200, save=False, ecdf=False):
+    """Plot delta parameter distributions as histograms or ECDFs.
     
-    seaborn.histplot(param_store['locs'].flatten(),color="slategray",label='shared',bins=50,stat='proportion')
-    for i in range(len(categories)):
-        seaborn.histplot(param_store['discov_dm'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
-    seaborn.histplot(param_store['batch_dm'].flatten(),color='lightgrey',bins=50,label='batch',stat='proportion')
+    For each of DM, DI, and DC parameters, plots either histograms (default) or ECDF plots
+    if ecdf=True. If save is True, each plot is saved as an SVG in the folder specified by sc.settings.figdir.
+    
+    Parameters
+    ----------
+    antipode_model : object
+        The model object containing data and parameter stores.
+    bins : int, optional
+        Number of bins for histograms (ignored for ECDF plots), by default 200.
+    save : bool, optional
+        If True, save the plot as an SVG file, by default False.
+    ecdf : bool, optional
+        If True, render ECDF plots instead of histograms, by default False.
+    """
+    categories = antipode_model.adata_manager.registry['field_registries'][
+        'discov_ind']['state_registry']['categorical_mapping']
+    colors = antipode_model.adata_manager.adata.uns[
+        antipode_model.adata_manager.registry['field_registries'][
+            'discov_ind']['state_registry']['original_key'] + '_colors']
+    param_store = antipode_model.adata_manager.adata.uns['param_store']
+
+    # DM plot
+    plt.figure()
+    if ecdf:
+        seaborn.ecdfplot(x=param_store['locs'].flatten(), color="slategray", label='shared')
+        for i in range(len(categories)):
+            seaborn.ecdfplot(x=param_store['discov_dm'][i, ...].flatten(), color=colors[i],
+                              label=categories[i])
+        seaborn.ecdfplot(x=param_store['batch_dm'].flatten(), color='lightgrey', label='batch')
+    else:
+        seaborn.histplot(param_store['locs'].flatten(), color="slategray",
+                          label='shared', bins=bins, stat='proportion')
+        for i in range(len(categories)):
+            seaborn.histplot(param_store['discov_dm'][i, ...].flatten(), color=colors[i],
+                              bins=bins, label=categories[i], stat='proportion')
+        seaborn.histplot(param_store['batch_dm'].flatten(), color='lightgrey',
+                          bins=bins, label='batch', stat='proportion')
     plt.legend()
     plt.title('DM')
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_d_hists_DM.svg')
+        plt.savefig(filename, format='svg')
     plt.show()
-    
-    seaborn.histplot(param_store['cluster_intercept'].flatten(),color='slategray',bins=50,label='shared',stat='proportion')
-    for i in range(len(categories)):
-        seaborn.histplot(param_store['discov_di'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
-    seaborn.histplot(param_store['batch_di'].flatten(),color='lightgrey',bins=50,label='batch',stat='proportion')
+
+    # DI plot
+    plt.figure()
+    if ecdf:
+        seaborn.ecdfplot(x=param_store['cluster_intercept'].flatten(), color="slategray",
+                          label='shared')
+        for i in range(len(categories)):
+            seaborn.ecdfplot(x=param_store['discov_di'][i, ...].flatten(), color=colors[i],
+                              label=categories[i])
+        seaborn.ecdfplot(x=param_store['batch_di'].flatten(), color='lightgrey',
+                          label='batch')
+    else:
+        seaborn.histplot(param_store['cluster_intercept'].flatten(), color="slategray",
+                          label='shared', bins=bins, stat='proportion')
+        for i in range(len(categories)):
+            seaborn.histplot(param_store['discov_di'][i, ...].flatten(), color=colors[i],
+                              bins=bins, label=categories[i], stat='proportion')
+        seaborn.histplot(param_store['batch_di'].flatten(), color='lightgrey',
+                          bins=bins, label='batch', stat='proportion')
     plt.legend()
     plt.title('DI')
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_d_hists_DI.svg')
+        plt.savefig(filename, format='svg')
     plt.show()
-    
-    seaborn.histplot(param_store['z_decoder_weight'].flatten(),color='slategray',bins=50,label='shared',stat='proportion')
-    for i in range(len(categories)):
-        seaborn.histplot(param_store['discov_dc'][i,...].flatten(),color=colors[i],bins=50,label=categories[i],stat='proportion')
+
+    # DC plot
+    plt.figure()
+    if ecdf:
+        seaborn.ecdfplot(x=param_store['z_decoder_weight'].flatten(), color="slategray",
+                          label='shared')
+        for i in range(len(categories)):
+            seaborn.ecdfplot(x=param_store['discov_dc'][i, ...].flatten(), color=colors[i],
+                              label=categories[i])
+    else:
+        seaborn.histplot(param_store['z_decoder_weight'].flatten(), color="slategray",
+                          label='shared', bins=bins, stat='proportion')
+        for i in range(len(categories)):
+            seaborn.histplot(param_store['discov_dc'][i, ...].flatten(), color=colors[i],
+                              bins=bins, label=categories[i], stat='proportion')
     plt.legend()
     plt.title('DC')
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_d_hists_DC.svg')
+        plt.savefig(filename, format='svg')
+    plt.show()
+   
+    plt.figure()
+    if ecdf:
+        for i in range(len(categories)):
+            seaborn.ecdfplot(x=(param_store['discov_constitutive_de']-param_store['discov_constitutive_de'].mean(0))[i, ...].flatten(), color=colors[i],
+                              label=categories[i])
+    else:
+        for i in range(len(categories)):
+            seaborn.histplot((param_store['discov_constitutive_de']-param_store['discov_constitutive_de'].mean(0))[i, ...].flatten(), color=colors[i],
+                              bins=bins, label=categories[i], stat='proportion')
+    plt.legend()
+    plt.title('DA')
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_d_hists_DA.svg')
+        plt.savefig(filename, format='svg')
     plt.show()
 
-def plot_tree_edge_weights(antipode_model):
-    for name in antipode_model.adata_manager.adata.uns['param_store'].keys():
+
+
+def plot_tree_edge_weights(antipode_model, save=False):
+    """Plot heatmaps of tree edge weights; save each as SVG if save is True."""
+    param_store = antipode_model.adata_manager.adata.uns['param_store']
+    for name, param in param_store.items():
         if 'edge' in name:
-            seaborn.heatmap(scipy.special.softmax(antipode_model.adata_manager.adata.uns['param_store'][name],axis=-1))
-            plt.show()
+            seaborn.heatmap(scipy.special.softmax(param, axis=-1))
+            plt.title(name)
+            if save:
+                filename = os.path.join(sc.settings.figdir, f'plot_tree_edge_weights_{name}.svg')
+                plt.savefig(filename, format='svg')
+                plt.show()
+            else:
+                plt.show()
 
-def plot_gmm_heatmaps(antipode_model):
-    categories=antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['categorical_mapping']
-    colors=antipode_model.adata_manager.adata.uns[antipode_model.adata_manager.registry['field_registries']['discov_ind']['state_registry']['original_key']+'_colors']
-    param_store=antipode_model.adata_manager.adata.uns['param_store']
 
-    seaborn.clustermap(antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy(),cmap='coolwarm')
+def plot_gmm_heatmaps(antipode_model, save=False):
+    """Plot GMM clustermaps and histograms; save each plot as SVG if save is True."""
+    categories = antipode_model.adata_manager.registry['field_registries'][
+        'discov_ind']['state_registry']['categorical_mapping']
+    colors = antipode_model.adata_manager.adata.uns[
+        antipode_model.adata_manager.registry['field_registries'][
+            'discov_ind']['state_registry']['original_key'] + '_colors']
+    param_store = antipode_model.adata_manager.adata.uns['param_store']
+
+    # locs clustermap
+    data = antipode_model.z_transform(torch.tensor(param_store['locs'])).numpy()
+    g = seaborn.clustermap(data, cmap='coolwarm', center=0)
     plt.title('locs')
-    plt.show()
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_gmm_heatmaps_locs.svg')
+        g.fig.savefig(filename, format='svg')
+        plt.show(g.fig)
+    else:
+        plt.show()
 
-    seaborn.clustermap(param_store['locs_dynam'],cmap='coolwarm')
+    # locs_dynam clustermap
+    g = seaborn.clustermap(param_store['locs_dynam'], cmap='coolwarm', center=0)
     plt.title('locs_dynam')
-    plt.show()
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_gmm_heatmaps_locs_dynam.svg')
+        g.fig.savefig(filename, format='svg')
+        plt.show(g.fig)
+    else:
+        plt.show()
 
-    seaborn.clustermap(param_store['scales'],cmap='coolwarm')
+    # scales clustermap
+    g = seaborn.clustermap(param_store['scales'], cmap='coolwarm')
     plt.title('scales')
-    plt.show()
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_gmm_heatmaps_scales.svg')
+        g.fig.savefig(filename, format='svg')
+        plt.show(g.fig)
+    else:
+        plt.show()
 
-    seaborn.histplot(param_store['s_inverse_dispersion'].flatten(),color='grey',bins=50)
+    # inverse_dispersion histogram
+    seaborn.histplot(param_store['s_inverse_dispersion'].flatten(), color='grey', bins=50)
     plt.title('inverse_dispersion')
-    plt.show()
+    if save:
+        filename = os.path.join(sc.settings.figdir, 'plot_gmm_heatmaps_inverse_dispersion.svg')
+        plt.savefig(filename, format='svg')
+        plt.show()
+    else:
+        plt.show()
     
 
 def match_categorical_order(source, target):
