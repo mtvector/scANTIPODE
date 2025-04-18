@@ -272,6 +272,10 @@ class AntipodeTrainingMixin:
     def run_standard_protocol(self, out_path, max_steps=500000, num_particles=3,
                               device='cuda', max_learning_rate=1e-3, one_cycle_lr=True, 
                               batch_size=32, correction_steps=None):
+        if isinstance(max_steps, int):
+            max_steps = [max_steps] * 3  # Now each phase uses the same value.
+        elif isinstance(max_steps, list) and len(max_steps) == 3:
+            pass  # Already a list of 3 values, so use as-is.
         # Map phases to checkpoint file paths
         checkpoint_files = {
             1: os.path.join(out_path, 'p1_model.pt'),
@@ -304,7 +308,6 @@ class AntipodeTrainingMixin:
         else:
             # Otherwise, use the adata already in the model.
             adata = self.adata_manager.adata
-    
         # If a checkpoint exists, load the corresponding model with the chosen adata.
         if last_completed_phase:
             self.load(out_path, prefix=f'p{last_completed_phase}_', adata=adata, device=device)
@@ -316,20 +319,19 @@ class AntipodeTrainingMixin:
         if last_completed_phase < 1:
             # Phase 1
             print('Running phase 1')
-            self.train_phase(phase=1, max_steps=max_steps, print_every=10000, num_particles=num_particles,
+            self.train_phase(phase=1, max_steps=max_steps[0], print_every=10000, num_particles=num_particles,
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, clip_std=100.)
             plot_loss(self.losses)
             self.store_outputs(device=device, prefix='')
             self.clear_cuda()
             self.save(out_path, save_anndata=False, prefix='p1_')
-        
         if last_completed_phase < 2:
             # Phase 2
             print('Running phase 2')
             self.store_outputs(device=device, prefix='')
             self.prepare_phase_2(epochs=2, device=device, dimension_reduction='X_antipode')
-            self.train_phase(phase=2, max_steps=int(max_steps/2), print_every=10000, num_particles=num_particles,
+            self.train_phase(phase=2, max_steps=max_steps[1], print_every=10000, num_particles=num_particles,
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, freeze_encoder=True, clip_std=100.)
             plot_loss(self.losses)
@@ -341,7 +343,7 @@ class AntipodeTrainingMixin:
             # Phase 3
             print('Running phase 3')
             self.store_outputs(device=device, prefix='')
-            self.train_phase(phase=3, max_steps=max_steps, print_every=10000, num_particles=num_particles,
+            self.train_phase(phase=3, max_steps=max_steps[2], print_every=10000, num_particles=num_particles,
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, clip_std=100)
             plot_loss(self.losses)

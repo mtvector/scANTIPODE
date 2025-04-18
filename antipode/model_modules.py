@@ -48,7 +48,7 @@ class MAPLaplaceModule(MMB):
     MAP module for a maximum a posteriori estimate given a laplacian prior. 
     Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right)
     '''
-    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False):
+    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.):
         super().__init__(model)
         self.param_name=name
         self.param_shape=param_shape
@@ -57,13 +57,14 @@ class MAPLaplaceModule(MMB):
         self.constraint=constraint if constraint is not None else constraints.real
         self.init_val=init_val
         self.param_only=param_only
-    
+        self.scale_multiplier=scale_multiplier
+
     def model_sample(self,s=torch.ones(1),scale=[]):
         if self.param_only:
             return self.make_params(s)
         with existing_plate_stack(scale+self.plate_list):
             return pyro.sample(self.param_name+'_sample',dist.Laplace(s.new_zeros(self.param_shape),
-                            self.model.prior_scale*s.new_ones(self.param_shape),validate_args=True).to_event(self.dependent_dim))
+                            self.scale_multiplier*self.model.prior_scale*s.new_ones(self.param_shape),validate_args=True).to_event(self.dependent_dim))
     
     def make_params(self,s=torch.ones(1)):
         if self.init_val is not None:
@@ -84,7 +85,7 @@ class MAPHalfCauchyModule(MMB):
     MAP module for a maximum a posteriori estimate given a half cauchy prior. 
     Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right)
     '''
-    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False):
+    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.):
         super().__init__(model)
         self.param_name=name
         self.param_shape=param_shape
@@ -93,13 +94,14 @@ class MAPHalfCauchyModule(MMB):
         self.constraint=constraint if constraint is not None else constraints.real
         self.init_val=init_val
         self.param_only=param_only
+        self.scale_multiplier=scale_multiplier
     
     def model_sample(self,s=torch.ones(1),scale=[]):
         if self.param_only:
             return self.make_params(s)
         with existing_plate_stack(scale+self.plate_list):
             return pyro.sample(self.param_name+'_sample',dist.HalfCauchy(
-                            s.new_ones(self.param_shape)).to_event(self.dependent_dim))
+                            self.scale_multiplier*s.new_ones(self.param_shape)).to_event(self.dependent_dim))
     
     def make_params(self,s=torch.ones(1)):
         if self.init_val is not None:
