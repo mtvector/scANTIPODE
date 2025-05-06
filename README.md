@@ -1,9 +1,9 @@
 <h1 style="text-align: center;"> scANTIPODE</h1>
-
-[<div align="center">
+<a href="https://en.wikipedia.org/wiki/Antipodes"> 
+<div align="center">
   <img src="assets/antipode_logo_alternate.png" alt="antipode logo!" width="200">
-</div>]("https://en.wikipedia.org/wiki/Antipodes")
-
+</div>
+</a>
 
 **NOTICE: This package will be under heavy development until publication, and will be subject to changes until release 0.1**
 
