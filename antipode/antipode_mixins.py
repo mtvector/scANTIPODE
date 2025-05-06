@@ -356,16 +356,19 @@ class AntipodeTrainingMixin:
         self.store_outputs(device=device, prefix='')#Cheap and just for safety
         # Final correction (always run after phase 3)
         print('Running final correction')
-        if correction_steps is not None:
-            posterior_out, posterior_categories = self.correct_fits(batch_size=128, n_steps=correction_steps,num_particles=num_particles)
-        else:
-            posterior_out, posterior_categories = self.correct_fits_intercepts(batch_size=128)
-            
-        self.store_outputs(device=device, prefix='')
         try:
-            self.save(out_path, save_anndata=True, prefix='p4_')
+            if correction_steps is not None:
+                posterior_out, posterior_categories = self.correct_fits(batch_size=128, n_steps=correction_steps,num_particles=num_particles)
+            else:
+                posterior_out, posterior_categories = self.correct_fits_intercepts(batch_size=128)
+                
+            self.store_outputs(device=device, prefix='')
+            try:
+                self.save(out_path, save_anndata=False, prefix='p4_')
+            except Exception as e:
+                print("saving error ocurred:",e)
         except Exception as e:
-            print("saving error ocurred:",e)
+            print("Skipping correction",e)
         return self
     
     def allDone(self):

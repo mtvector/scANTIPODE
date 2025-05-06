@@ -14,6 +14,9 @@ import scanpy as sc
 import sklearn
 import os
 import itertools
+from typing import List, Union, Tuple, Literal
+import glasbey
+from colorspacious import cspace_convert
 
 from . import model_functions
 try:
@@ -320,7 +323,6 @@ def match_categorical_order(source, target):
     
     return np.array(sorted_indices)
 
-
 def ndarray_top_n_indices(arr, n, axis,descending=True):
     """
     Replace the specified axis of a numpy array with the indices of the top n values along that axis.
@@ -357,6 +359,130 @@ def ndarray_top_n_indices(arr, n, axis,descending=True):
     np.put_along_axis(result, indices_shape, top_n_indices, axis=axis)
     
     return result
+
+# Helper: convert a hex string (e.g. "#RRGGBB") to an sRGB triple in [0, 1].
+def hex_to_rgb(hex_color: str) -> np.ndarray:
+    hex_color = hex_color.lstrip('#')
+    return np.array([int(hex_color[i:i+2], 16)/255.0 for i in (0, 2, 4)], dtype=np.float32)
+
+def create_hierarchical_palette(adata, levels, palette_func, global_hue_bounds=(0, 360), uns_key_prefix="", hue_cushion: float = 0, **palette_kwargs):
+    """
+    Create hierarchical color palettes for sequential levels such that the lower levels
+    are arranged in blocks corresponding to the top-level. For each lower level, the full
+    hue range (global_hue_bounds) is divided into as many equal wedges as there are top-level
+    categories. Then, each wedge is re-centered on the hue of the corresponding top-level color,
+    with an optional cushion (hue_cushion, in degrees) reserved between groups. The restricted
+    hue range is passed to palette_func to generate the block for that top-level category.
+    
+    The function reassigns the categorical order in adata.obs for each level and stores both a
+    dictionary mapping and an ordered color list in adata.uns. Probably shouldn't have been based
+    on anndata, but here we are...
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data object with categorical columns in .obs for each level.
+    levels : list of str
+        List of level names from top to bottom, e.g.
+        ["Class", "Subclass_markers", "Group", "consensus_cluster"].
+    palette_func : function
+        Function that generates a palette given a block size (an int) and (optionally) hue_bounds.
+        (For example, it could be a restricted version of glasbey.create_palette.)
+    global_hue_bounds : tuple (float, float)
+        The full hue range, e.g. (0, 360).
+    uns_key_prefix : str, optional
+        Optional prefix for keys in adata.uns.
+    hue_cushion : float, optional
+        The proportino of color space to reserve as a gap between top-level groups.
+        Default is 0.
+    **palette_kwargs :
+        Additional keyword arguments passed to palette_func (e.g. grid_size, grid_space, lightness_bounds,
+        chroma_bounds, colorblind_safe, as_hex, etc.).
+    
+    Returns
+    -------
+    palette_mappings : dict
+        Dictionary with one entry per level. Each entry is a dict with:
+          - "order": list of category names (in hierarchical order)
+          - "mapping": dict mapping each category to its assigned color.
+    """
+    if "theme_color_spacing" in palette_kwargs:
+        del palette_kwargs["theme_color_spacing"]
+    hue_cushion = min(hue_cushion,0.99)
+    hue_cushion = max(hue_cushion,0.)
+    
+    palette_mappings = {}
+    
+    # --- Top Level ---
+    top_level = levels[0]
+    top_order = list(adata.obs[top_level].cat.categories)
+    # Generate one color per top-level category in one call.
+    top_palette = glasbey.create_palette(len(top_order), **palette_kwargs)
+    top_mapping = {cat: col for cat, col in zip(top_order, top_palette)}
+    palette_mappings[top_level] = {"order": top_order, "mapping": top_mapping}
+    adata.uns[f"{uns_key_prefix}{top_level}_colors_dict"] = top_mapping
+    adata.uns[f"{uns_key_prefix}{top_level}_colors"] = [top_mapping[cat] for cat in top_order]
+    
+    # For each subsequent level, group by the top-level.
+    for i in range(1, len(levels)):
+        current_level = levels[i]
+        current_global_order = list(adata.obs[current_level].cat.categories)
+        
+        # Group by top-level: determine for each child its top-level parent.
+        grouping_dict = (
+            adata.obs.groupby(current_level)[top_level]
+            .value_counts().unstack()
+            .idxmax(1).to_dict()
+        )
+        
+        # Build hierarchical ordering: for each top-level category in order, select those child categories.
+        current_order = []
+        top_to_children = {}
+        for t in top_order:
+            children = [child for child in current_global_order if grouping_dict.get(child) == t]
+            top_to_children[t] = children
+            current_order.extend(children)
+        
+        adata.obs[current_level] = adata.obs[current_level].cat.reorder_categories(current_order)
+        
+        # For each top-level category, get its block size.
+        block_sizes = [len(top_to_children[t]) for t in top_order]
+        wedge_size = (global_hue_bounds[1] - global_hue_bounds[0]) / len(top_order)
+        
+        current_palette = []
+        for idx, t in enumerate(top_order):
+            n_children = len(top_to_children[t])
+            if n_children == 0:
+                continue
+            top_color = top_mapping[t]
+            if isinstance(top_color, str):
+                srgb = hex_to_rgb(top_color)
+            else:
+                srgb = np.array(top_color, dtype=np.float32)
+            top_color_jch = cspace_convert(np.array([srgb]), "sRGB1", "JCh")[0]
+            center_hue = top_color_jch[2]
+            # Apply hue cushion: available width equals wedge_size minus hue_cushion.
+            available_width = wedge_size - wedge_size*hue_cushion
+            if available_width < 0:
+                available_width = 0
+            restricted_hue_bounds = (center_hue - available_width/2, center_hue + available_width/2)
+            block_palette = glasbey.create_palette(n_children, hue_bounds=restricted_hue_bounds, **palette_kwargs)
+            current_palette.extend(block_palette)
+        
+        current_mapping = {}
+        start_idx = 0
+        for t in top_order:
+            n_children = len(top_to_children[t])
+            block_colors = current_palette[start_idx:start_idx + n_children]
+            start_idx += n_children
+            for child, col in zip(top_to_children[t], block_colors):
+                current_mapping[child] = col
+        
+        palette_mappings[current_level] = {"order": current_order, "mapping": current_mapping}
+        adata.uns[f"{uns_key_prefix}{current_level}_colors_dict"] = current_mapping
+        adata.uns[f"{uns_key_prefix}{current_level}_colors"] = [current_mapping[cat] for cat in current_order]
+    
+    return palette_mappings
 
 def double_triu_mat(cor_matrix_upper, cor_matrix_lower, diagonal_vector=None):
     """Function to plot one triangular matrix in the upper, another on the lower and a normalized diagonal"""
@@ -893,7 +1019,6 @@ def get_prerank_custom_list(input_series,gene_list_dict,**kwargs):
                          seed=13,
                          **kwargs)
     return(pre_res.res2d)
-
 
 def get_prerank_from_mat(mat,gene_list_dict,**kwargs):
     """

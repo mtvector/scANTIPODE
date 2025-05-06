@@ -66,7 +66,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                  num_latent=50, scale_factor=None, prior_scale=100, dcd_prior=None, sampler_category=None, theta_prior=10.,
                  loc_as_param=True,zdw_as_param=True, intercept_as_param=False, seccov_as_param=True,use_q_score=False, use_psi=True, psi_levels=[True],
                  num_batch_embed=2,  min_theta=1e-1, scale_init_val=0.01, bi_depth=2, z_transform=None, dist_normalize=False,
-                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],anc_prior_scalar=0.5):
+                 classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],anc_prior_scalar=torch.tensor(0.5)):
 
         pyro.clear_param_store()
         self.init_args = dict(locals())
@@ -77,6 +77,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.num_discov = adata.obsm[self.discov_key].shape[-1] if self.discov_loc == 'obsm' else len(adata.obs[self.discov_key].unique())
         self.num_batch = adata.obsm[self.batch_key].shape[-1] if self.batch_loc == 'obsm' else len(adata.obs[self.batch_key].unique())        
         self.design_matrix = (self.discov_loc == 'obsm')
+        if self.discov_loc == 'obsm':
+            adata.obsm['discov_onehot'] = adata.obsm[self.discov_key]
         self.layer = layer
         self.num_seccov = adata.obsm[self.seccov_key].shape[-1] if self.seccov_key != 'seccov_dummy' else 1
         
@@ -105,7 +107,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.sampler_category = sampler_category
         self.psi_levels = [float(x) for x in psi_levels]
         self.min_theta = min_theta
-        self. anc_prior_scalar = anc_prior_scalar
+        self.anc_prior_scalar = anc_prior_scalar
         
         self.dcd_prior = torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
                 
@@ -120,18 +122,29 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.batch_embed_plate = pyro.plate('batch_embed_plate',self.num_batch_embed,dim=-3)
         self.bi_depth_plate = pyro.plate('bi_depth_plate',self.bi_depth,dim=-2)
 
+        self.batch_multiplier = self.anc_prior_scalar.min() if hasattr(self.anc_prior_scalar,'shape') else self.anc_prior_scalar
+        
         #Initialize MAP inference modules
-        self.dm=MAPLaplaceModule(self,'discov_dm',[self.num_discov,self.num_labels,self.num_latent],[self.discov_plate,self.label_plate,self.latent_plate])
-        self.sm=MAPLaplaceModule(self,'seccov_dm',[self.num_seccov,self.num_labels,self.num_latent],[self.seccov_plate,self.label_plate,self.latent_plate],param_only=self.seccov_as_param)
-        self.bm=MAPLaplaceModule(self,'batch_dm',[self.num_batch,self.num_labels,self.num_latent],[self.batch_plate,self.label_plate,self.latent_plate])
-        self.di=MAPLaplaceModule(self,'discov_di',[self.num_discov,self.num_labels,self.num_var],[self.discov_plate,self.label_plate,self.var_plate])
-        self.bei=MAPLaplaceModule(self,'batch_di',[self.num_batch_embed,self.bi_depth,self.num_var],[self.batch_embed_plate,self.bi_depth_plate,self.var_plate])
-        self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate],param_only=self.intercept_as_param,scale_multiplier=self.anc_prior_scalar)
-        self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],[self.discov_plate,self.latent_plate2,self.var_plate])
-        self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],[self.latent_plate2,self.var_plate],init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=self.zdw_as_param,scale_multiplier=self.anc_prior_scalar)
-        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=self.loc_as_param,scale_multiplier=self.anc_prior_scalar)
-        self.zs=MAPHalfCauchyModule(self,'scales',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],init_val=self.scale_init_val*torch.ones(self.num_labels,self.num_latent),constraint=constraints.positive,param_only=False)
-        self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False,scale_multiplier=self.anc_prior_scalar)
+        self.dm=MAPLaplaceModule(self,'discov_dm',[self.num_discov,self.num_labels,self.num_latent],
+                                 [self.discov_plate,self.label_plate,self.latent_plate],scale_multiplier=self.anc_prior_scalar)
+        self.sm=MAPLaplaceModule(self,'seccov_dm',[self.num_seccov,self.num_labels,self.num_latent],
+                                 [self.seccov_plate,self.label_plate,self.latent_plate],param_only=self.seccov_as_param)
+        self.bm=MAPLaplaceModule(self,'batch_dm',[self.num_batch,self.num_labels,self.num_latent],[self.batch_plate,self.label_plate,self.latent_plate],scale_multiplier=self.batch_multiplier)
+        self.di=MAPLaplaceModule(self,'discov_di',[self.num_discov,self.num_labels,self.num_var],
+                                 [self.discov_plate,self.label_plate,self.var_plate],scale_multiplier=self.anc_prior_scalar)
+        self.bei=MAPLaplaceModule(self,'batch_di',[self.num_batch_embed,self.bi_depth,self.num_var],[self.batch_embed_plate,self.bi_depth_plate,self.var_plate],scale_multiplier=self.batch_multiplier)
+        self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate],param_only=self.intercept_as_param)
+        self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],
+                                 [self.discov_plate,self.latent_plate2,self.var_plate],scale_multiplier=self.anc_prior_scalar)
+        self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],
+                                  [self.latent_plate2,self.var_plate],
+                                  init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=self.zdw_as_param)
+        self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=self.loc_as_param)
+        self.zs=MAPHalfCauchyModule(self,'scales',[self.num_labels,self.num_latent],
+                                    [self.label_plate,self.latent_plate],
+                                    init_val=self.scale_init_val*torch.ones(self.num_labels,self.num_latent),
+                                    constraint=constraints.positive,param_only=False)
+        self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
         self.qg=MAPLaplaceModule(self,'quality_genes',[1,self.num_var],[self.var_plate],param_only=False)
         
         self.tree_edges = TreeEdges(self,straight_through=False)
@@ -216,8 +229,12 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         
         minibatch_plate=pyro.plate("minibatch_plate", s.shape[0],dim=-1)
         minibatch_plate2=pyro.plate("minibatch_plate2", s.shape[0],dim=-2)
-        l = s.sum(1).unsqueeze(-1)
-                
+        
+        # l = s.sum(1).unsqueeze(-1)
+        mask = ~torch.isnan(s)                  
+        s_obs = torch.nan_to_num(s, nan=0.0)    
+        l = torch.nansum(s, dim=1).unsqueeze(-1)
+        
         # Scale all sample statements for numerical stability
         with poutine.scale(scale=self.scale_factor):
             # Counts parameter of NB (variance of the observation distribution)
@@ -312,7 +329,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             
             with self.var_plate,minibatch_plate2:
                 s_dist = dist.NegativeBinomial(total_count=s_theta,logits=log_mu-s_theta.log(),validate_args=True)
-                s_out=pyro.sample("s", s_dist, obs=s.int())
+                s_dist = s_dist.mask(mask)
+                pyro.sample("s", s_dist, obs=s_obs.int())     
+                #s_out=pyro.sample("s", s_dist, obs=s.int())
             return(norm_spliced_mu - softmax_shift)
     
     # the variational distribution
