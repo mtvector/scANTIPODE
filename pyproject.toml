@@ -26,9 +26,17 @@ dependencies = [
     "scvi-tools",
     "pyro-ppl",
     "seaborn",
-    "ete3",
     "scikit-learn",
-    "PyComplexHeatmap"
+    "legacy-cgi",
+    "ete3"
+]
+
+[project.optional-dependencies]
+extras = [
+    "biopython",
+    "gseapy",
+    "PyComplexHeatmap",
+    "glasbey",
 ]
 
 [project.urls]

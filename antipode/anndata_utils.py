@@ -177,4 +177,3 @@ def read_h5ad_backed_selective(
             adata.var.index = list(index_series)
             adata.var.drop("_index",axis=1, inplace=True)
         return adata
-

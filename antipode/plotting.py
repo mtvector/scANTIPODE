@@ -5,10 +5,12 @@ import scipy
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
+import xarray as xr
 from matplotlib.patches import Wedge
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 import matplotlib.patches as patches
+from matplotlib.lines import Line2D
 import tqdm
 import scanpy as sc
 import sklearn
@@ -17,6 +19,7 @@ import itertools
 from typing import List, Union, Tuple, Literal
 import glasbey
 from colorspacious import cspace_convert
+from matplotlib.colors import LinearSegmentedColormap
 
 from . import model_functions
 try:
@@ -36,7 +39,7 @@ def plot_loss(loss_tracker):
     '''Plots vector of values along with moving average'''
     seaborn.scatterplot(x=list(range(len(loss_tracker))),y=loss_tracker,alpha=0.5,s=2)
     w=300
-    mvavg=model_functions.moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
+    mvavg=moving_average(np.pad(loss_tracker,int(w/2),mode='edge'),w)
     seaborn.lineplot(x=list(range(len(mvavg))),y=mvavg,color='coral')
     plt.show()
 
@@ -594,9 +597,10 @@ def plot_gene_mean_ecdf(adata,discov_key):
     outs=antipode.model_functions.group_aggr_anndata(adata,[discov_key])
     seaborn.ecdfplot(pd.DataFrame(outs[0],index=outs[1][discov_key]).T)
 
+
 def pie_dotplot(means_list, proportions_list, column_names, row_names,
                 colormaps=None, max_radius=0.4, figsize=(10, 8),
-                scale_by='column', mean_vmin=None, mean_vmax=None):
+                scale_by='column', mean_vmin=None, mean_vmax=None,fontsize_mul=1.2):
     """
     Plots a grid of pie charts where:
       - Each cell is drawn as a pie chart with equal angular slices.
@@ -636,124 +640,429 @@ def pie_dotplot(means_list, proportions_list, column_names, row_names,
     fig, ax : matplotlib Figure and Axes
     """
     if len(means_list) != len(proportions_list):
-        raise ValueError("means_list and proportions_list must have the same length")
+        raise ValueError("means_list and proportions_list must match")
     n_slices = len(means_list)
     n_clusters, n_genes = means_list[0].shape
-
-    # Set default colormaps if not provided.
     if colormaps is None:
-        default_cmaps = ['Blues', 'Oranges', 'Greens', 'Purples', 'Reds', 'Greys']
-        if n_slices > len(default_cmaps):
-            colormaps = [default_cmaps[i % len(default_cmaps)] for i in range(n_slices)]
-        else:
-            colormaps = default_cmaps[:n_slices]
+        defaults = ['Blues','Oranges','Greens','Purples','Reds','Greys']
+        colormaps = [defaults[i % len(defaults)] for i in range(n_slices)]
+    global_vmin = [np.min(m) for m in means_list]
+    global_vmax = [np.max(m) for m in means_list]
 
-    # For legend purposes, compute global min/max for each slice.
-    global_vmin = []
-    global_vmax = []
-    for k in range(n_slices):
-        global_vmin.append(np.min(means_list[k]))
-        global_vmax.append(np.max(means_list[k]))
-
-    # Precompute normalization ranges for cell-level scaling.
-    if scale_by is None:
-        if mean_vmin is None:
-            mean_vmin = [np.min(m) for m in means_list]
-        if mean_vmax is None:
-            mean_vmax = [np.max(m) for m in means_list]
-    elif scale_by == 'column':
-        # For each gene (column), compute the min and max over all clusters and slices.
-        col_vmin = np.empty(n_genes)
-        col_vmax = np.empty(n_genes)
-        for j in range(n_genes):
-            col_vmin[j] = min(np.min(matrix[:, j]) for matrix in means_list)
-            col_vmax[j] = max(np.max(matrix[:, j]) for matrix in means_list)
+    # precompute column/row vmin/vmax if requested
+    if scale_by == 'column':
+        col_vmin = np.array([min(np.min(m[:, j]) for m in means_list)
+                              for j in range(n_genes)])
+        col_vmax = np.array([max(np.max(m[:, j]) for m in means_list)
+                              for j in range(n_genes)])
     elif scale_by == 'row':
-        # For each cluster (row), compute the min and max over all genes and slices.
-        row_vmin = np.empty(n_clusters)
-        row_vmax = np.empty(n_clusters)
-        for i in range(n_clusters):
-            row_vmin[i] = min(np.min(matrix[i, :]) for matrix in means_list)
-            row_vmax[i] = max(np.max(matrix[i, :]) for matrix in means_list)
-    else:
-        raise ValueError("scale_by must be either 'column', 'row', or None.")
+        row_vmin = np.array([min(np.min(m[i, :]) for m in means_list)
+                              for i in range(n_clusters)])
+        row_vmax = np.array([max(np.max(m[i, :]) for m in means_list)
+                              for i in range(n_clusters)])
+    elif scale_by is not None:
+        raise ValueError("scale_by must be 'column', 'row', or None.")
 
+    # — create figure & axis —
     fig, ax = plt.subplots(figsize=figsize)
+    dpi = fig.dpi
 
-    # Adjust font sizes based on number of genes/clusters.
-    x_fontsize = max(6, min(10, 300 / n_genes))
-    y_fontsize = max(6, min(10, 300 / n_clusters))
-    ax.tick_params(axis='x', labelsize=x_fontsize)
-    ax.tick_params(axis='y', labelsize=y_fontsize)
-
-    # Loop over each grid cell.
+    # draw pies
     for i in range(n_clusters):
         for j in range(n_genes):
-            center = (j, i)
             for k in range(n_slices):
                 mean_val = means_list[k][i, j]
                 prop_val = proportions_list[k][i, j]
-                # Define angular range for the slice.
-                theta1 = 360 * k / n_slices + 30
-                theta2 = 360 * (k + 1) / n_slices + 30
+                theta1 = 360*k/n_slices + 30
+                theta2 = 360*(k+1)/n_slices + 30
                 radius = prop_val * max_radius
 
-                # Determine normalization range.
                 if scale_by == 'column':
-                    vmin = col_vmin[j]
-                    vmax = col_vmax[j]
+                    vmin, vmax = col_vmin[j], col_vmax[j]
                 elif scale_by == 'row':
-                    vmin = row_vmin[i]
-                    vmax = row_vmax[i]
+                    vmin, vmax = row_vmin[i], row_vmax[i]
                 else:
-                    vmin = mean_vmin[k]
-                    vmax = mean_vmax[k]
+                    vmin, vmax = global_vmin[k], global_vmax[k]
 
-                if vmax > vmin:
-                    norm_val = (mean_val - vmin) / (vmax - vmin)
-                else:
-                    norm_val = 0.5
+                norm_val = (mean_val - vmin)/(vmax - vmin) if vmax>vmin else 0.5
+                color = plt.get_cmap(colormaps[k])(norm_val)
+                ax.add_patch(Wedge((j, i), radius, theta1, theta2,
+                                   facecolor=color, edgecolor='none'))
 
-                cmap = plt.get_cmap(colormaps[k])
-                color = cmap(norm_val)
-                wedge = Wedge(center, radius, theta1, theta2, facecolor=color, edgecolor='none', linewidth=0)
-                ax.add_patch(wedge)
-
-    ax.set_xlim(-0.5, n_genes - 0.5)
-    ax.set_ylim(-0.5, n_clusters - 0.5)
+    # axis formatting
+    ax.set_xlim(-0.5, n_genes-0.5)
+    ax.set_ylim(-0.5, n_clusters-0.5)
     ax.set_xticks(range(n_genes))
     ax.set_xticklabels(column_names, rotation=90)
     ax.set_yticks(range(n_clusters))
     ax.set_yticklabels(row_names)
     ax.set_aspect('equal')
+    plt.tight_layout(rect=[0,0,0.82,1])
 
-    # Adjust the main axis to leave space on the right for colorbars.
-    plt.tight_layout(rect=[0, 0, 0.85, 1])
-
-    # Create a colorbar for each slice (colormap).
-    # We'll stack them vertically on the right side.
-    n_colorbars = n_slices
-    cbar_width = 0.03
-    cbar_gap = 0.02
-    total_height = 0.9  # relative to figure height
-    cbar_height = (total_height - (n_colorbars - 1) * cbar_gap) / n_colorbars
-    # Starting bottom position.
-    bottom_start = 0.05
-
+    # — colorbars
+    n_cb = n_slices
+    cbar_w = 0.03
+    gap = 0.01
+    span = 0.6
+    bottom = 0.2
+    h = (span - (n_cb-1)*gap)/n_cb
     for k in range(n_slices):
-        # For legend, we use the global min/max of each slice.
         norm = Normalize(vmin=global_vmin[k], vmax=global_vmax[k])
         sm = ScalarMappable(norm=norm, cmap=plt.get_cmap(colormaps[k]))
         sm.set_array([])
+        y0 = bottom + (n_cb-k-1)*(h+gap)
+        cax = fig.add_axes([0.87, y0, cbar_w, h])
+        cb = fig.colorbar(sm, cax=cax)
+        cb.ax.tick_params(labelsize=8)
+        cb.set_label(f'Slice {k+1}', fontsize=8)
 
-        # Compute position for this colorbar.
-        cbar_bottom = bottom_start + (n_colorbars - k - 1) * (cbar_height + cbar_gap)
-        cax = fig.add_axes([0.87, cbar_bottom, cbar_width, cbar_height])
-        cbar = fig.colorbar(sm, cax=cax)
-        cbar.ax.tick_params(labelsize=8)
-        cbar.set_label(f'Slice {k+1}\n({colormaps[k]})', fontsize=8)
+    # — dot‐size legend, now truly to scale —
+    # 1) figure dims & axis box
+    fig_w, fig_h = fig.get_size_inches()
+    bbox = ax.get_position()  # Bbox in fraction of figure
+    ax_w_in = fig_w * bbox.width
+    # 2) data units span in x is (n_genes - 1)
+    span_data = max(n_genes - 1, 1)
+    # 3) pixels per data‐unit
+    px_per_du = dpi * ax_w_in / span_data
+    # 4) diameter in pixels for proportion=1: data‐diameter=2*max_radius
+    dia_px = 2 * max_radius * px_per_du
+    # 5) convert px→points: 1 in = dpi px = 72 pt ⇒ 1 px = 72/dpi pt
+    dia_pt = dia_px * (72.0 / dpi)
+
+    # now build legend handles
+    proportions = [0.1, 0.25, 0.5, 1.0]
+    handles, labels = [], []
+    for p in proportions:
+        handles.append(Line2D([0],[0],
+                              marker='o', linestyle='',
+                              markersize=dia_pt * p,
+                              markerfacecolor='gray', markeredgecolor='none'))
+        labels.append(f'{p:.2f}')
+
+    ax.legend(handles, labels, title='Proportion',
+              bbox_to_anchor=(1.02, 0.05), loc='lower left',
+              borderaxespad=0., labelspacing=1.2, title_fontsize=8)
 
     return fig, ax
+
+
+def pie_dotplot_xr(ds: xr.Dataset,
+                   row_dim: str,
+                   col_dim: str,
+                   slice_dim: str,
+                   scalar_name: str = 'scalars',
+                   prop_name:   str = 'proportions',
+                   colormaps=None,
+                   max_radius: float = 0.4,
+                   figsize=(10, 8),
+                   scale_by: str = 'column',
+                   mean_vmin=None,
+                   mean_vmax=None,
+                   fontsize_mul=1.2,
+                   # new spacing params:
+                   x_spacing: float = 1.0,
+                   y_spacing: float = 1.0):
+    """
+    Same as before, but you can now stretch/squish the grid:
+      x_spacing, y_spacing multiply the horizontal & vertical
+      distance between pie centers.
+    """
+    scalars = ds[scalar_name]
+    props   = ds[prop_name]
+    if scalars.dims != props.dims:
+        raise ValueError("scalars and proportions must share dims")
+
+    n_slices   = scalars.sizes[slice_dim]
+    n_clusters = scalars.sizes[row_dim]
+    n_genes    = scalars.sizes[col_dim]
+    row_vals   = scalars[row_dim].values
+    col_vals   = scalars[col_dim].values
+
+    # default colormaps
+    if colormaps is None:
+        defaults = ['Blues','Oranges','Greens','Reds','Purples','Greys']
+        colormaps = [defaults[i % len(defaults)] for i in range(n_slices)]
+    trunc_cmaps = []
+    for name in colormaps:
+        base = plt.get_cmap(name)
+        # sample the first 90% of that cmap
+        colors = base(np.linspace(0, 0.9, 256))
+        trunc = LinearSegmentedColormap.from_list(f'{name}_90', colors, N=256)
+        trunc_cmaps.append(trunc)
+
+    # compute vmin/vmax
+    global_vmin = scalars.min(dim=(row_dim, col_dim)).values
+    global_vmax = scalars.max(dim=(row_dim, col_dim)).values
+    if scale_by == 'column':
+        col_vmin = scalars.min(dim=(row_dim, slice_dim)).values
+        col_vmax = scalars.max(dim=(row_dim, slice_dim)).values
+    elif scale_by == 'row':
+        row_vmin = scalars.min(dim=(col_dim, slice_dim)).values
+        row_vmax = scalars.max(dim=(col_dim, slice_dim)).values
+    elif scale_by is not None:
+        raise ValueError("scale_by must be 'column', 'row', or None.")
+
+    # set up figure + axis
+    fig, ax = plt.subplots(figsize=figsize)
+    dpi = fig.dpi
+
+    # no grid
+    ax.grid(False)
+    ax.xaxis.grid(False, which='both')
+    ax.yaxis.grid(False, which='both')
+    ax.minorticks_off()
+
+    # draw wedges at (j*x_spacing, i*y_spacing)
+    for i in range(n_clusters):
+        for j in range(n_genes):
+            for k in range(n_slices):
+                m = scalars.isel({slice_dim:k, row_dim:i, col_dim:j}).item()
+                p = props.  isel({slice_dim:k, row_dim:i, col_dim:j}).item()
+                # θ1 = 360*k/n_slices + 30
+                # θ2 = 360*(k+1)/n_slices + 30
+                desired_center = -90
+                width = 360.0 / n_slices
+                half = width/2.0
+                θ1 = width*k + desired_center - half
+                θ2 = width*k + desired_center + half
+                
+                # radius unchanged
+                r  = p * max_radius
+
+                if scale_by == 'column':
+                    vmin, vmax = col_vmin[j], col_vmax[j]
+                elif scale_by == 'row':
+                    vmin, vmax = row_vmin[i], row_vmax[i]
+                else:
+                    vmin, vmax = global_vmin[k], global_vmax[k]
+                α     = (m - vmin)/(vmax - vmin) if vmax>vmin else 0.5
+                color = trunc_cmaps[k](α)
+
+                cx = j * x_spacing
+                cy = i * y_spacing
+                ax.add_patch(Wedge((cx, cy), r, θ1, θ2,
+                                   facecolor=color, edgecolor='none'))
+
+    # axis formatting: ticks at j*x_spacing, i*y_spacing
+    xt = [j*x_spacing for j in range(n_genes)]
+    yt = [i*y_spacing for i in range(n_clusters)]
+    ax.set_xlim(-0.5*x_spacing, (n_genes-0.5)*x_spacing)
+    ax.set_ylim((n_clusters-0.5)*y_spacing, -0.5*y_spacing)
+    ax.set_xticks(xt)
+    ax.set_xticklabels(col_vals,
+                       rotation=90,
+                       fontsize=max(6, min(10,300/n_genes))*fontsize_mul)
+    ax.set_yticks(yt)
+    ax.set_yticklabels(row_vals,
+                       fontsize=max(6, min(10,300/n_clusters))*fontsize_mul)
+    ax.set_aspect('equal')
+    plt.tight_layout(rect=[0,0,0.82,1])
+
+    # colorbars
+    n_cb = n_slices; w=0.03; gap=0.01; span=0.6; bot=0.2
+    h = (span - (n_cb-1)*gap)/n_cb
+    for k in range(n_slices):
+        norm = Normalize(vmin=global_vmin[k], vmax=global_vmax[k])
+        sm   = ScalarMappable(norm=norm,
+                              cmap=trunc_cmaps[k])
+        sm.set_array([])
+        y0  = bot + (n_cb-1-k)*(h+gap)
+        cax = fig.add_axes([0.87, y0, w, h])
+        cb  = fig.colorbar(sm, cax=cax)
+        cb.ax.tick_params(labelsize=8)
+        cb.set_label(f'{slice_dim}={ds[slice_dim].values[k]}',
+                     fontsize=8)
+
+    plt.tight_layout(rect=[0, 0, 0.75, 1])
+    fig.canvas.draw()
+
+    x0, y0 = ax.transData.transform((0, 0))
+    x1, y1 = ax.transData.transform((max_radius, 0))
+    r_px   = x1 - x0
+    
+    # 2) convert pixels → points
+    dpi    = fig.dpi
+    r_pt   = r_px * 72.0 / dpi   # this is the RADIUS in points
+    
+    # 3) build legend handles so that markersize (diameter in points)
+    #    = 2 * (proportion * r_pt)
+    props_legend = [0.1, 0.25, 0.5, 1.0]
+    handles, labels = [], []
+    for p in props_legend:
+        dia_pt = 2 * p * r_pt
+        handles.append(Line2D([0], [0],
+                              marker='o', linestyle='',
+                              markersize=dia_pt,
+                              markerfacecolor='gray',
+                              markeredgecolor='none'))
+        labels.append(f'{p:.2f}')
+    
+    ax.legend(handles, labels,
+              title='Proportion',
+              bbox_to_anchor=(1.02, 0.05), loc='lower left',
+              borderaxespad=0., labelspacing=1.2,
+              title_fontsize=8)
+
+    return fig, ax
+
+import matplotlib.patches as patches
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import patches
+from matplotlib.patches import Patch
+from matplotlib.colors import rgb_to_hsv, hsv_to_rgb
+import math
+import matplotlib.patheffects as pe
+
+
+def plot_tile_heatmap(data, dim_0_names, dim_1_names, dim_2_names, mini_grid_dims=None, 
+                      cell_size=1, cmap_name='tab20', heavy_linewidth=2, light_linewidth=0.2,font_size=10,save_path=None,
+                      legend_square_size = 0.4,legend_font_size = 7,legend_pad = 0.03
+):
+    """
+    Plot a nested heatmap where each cell (grid pair) is subdivided into mini tiles
+    representing ligand–receptor interaction strengths, and adds a legend for ligands.
+    
+    Parameters
+    ----------
+    data : np.ndarray
+        3D array of shape (n_rows, n_cols, n_ligands) with values in [0, 1].
+    dim_0_names : list of str
+        Labels for the rows (y-axis). Length should equal n_rows.
+    dim_1_names : list of str
+        Labels for the columns (x-axis). Length should equal n_cols.
+    dim_2_names : list of str
+        Names for each ligand (used to assign colors and for the legend).
+    mini_grid_dims : tuple of ints, optional
+        Dimensions (rows, cols) of the mini grid inside each cell. If None, the grid
+        will be as square as possible.
+    cell_size : float, optional
+        The size of each cell in the heatmap.
+    cmap_name : str, optional
+        Name of a qualitative colormap (e.g. 'tab20') to assign each ligand a unique base color.
+    heavy_linewidth : float, optional
+        Line width for the boundaries between cells.
+    light_linewidth : float, optional
+        Line width for the subgrid (mini-tile) borders.
+    """
+    n_rows_data, n_cols_data, n_ligands = data.shape
+
+    # Validate that provided labels match the data dimensions.
+    if len(dim_0_names) != n_rows_data:
+        raise ValueError(f"Expected {n_rows_data} row labels (dim_0_names), but got {len(dim_0_names)}.")
+    if len(dim_1_names) != n_cols_data:
+        raise ValueError(f"Expected {n_cols_data} column labels (dim_1_names), but got {len(dim_1_names)}.")
+
+    # Determine mini-grid dimensions (rows x cols) for subdividing each cell.
+    if mini_grid_dims is None:
+        n_rows = int(np.floor(np.sqrt(n_ligands)))
+        n_rows = max(n_rows, 1)
+        n_cols = int(np.ceil(n_ligands / n_rows))
+    else:
+        n_rows, n_cols = mini_grid_dims
+
+    # Get base colors for each ligand using the specified qualitative colormap.
+    cmap = plt.get_cmap(cmap_name)
+    base_colors = [cmap(i / n_ligands) for i in range(n_ligands)]
+    
+    # Create figure and axis.
+    fig, ax = plt.subplots(figsize=(n_cols_data * cell_size, n_rows_data * cell_size))
+    ax.set_xlim(0, n_cols_data * cell_size)
+    ax.set_ylim(0, n_rows_data * cell_size)
+    ax.set_aspect('equal')
+    # Invert y-axis so that the first row appears at the top.
+    ax.invert_yaxis()
+    
+    # Loop over each cell in the grid.
+    for i in tqdm.tqdm(range(n_rows_data)):
+        for j in range(n_cols_data):
+            cell_x = j * cell_size
+            cell_y = i * cell_size
+            # Draw heavy border for the cell.
+            ax.add_patch(patches.Rectangle((cell_x, cell_y), cell_size, cell_size, 
+                                           fill=False, edgecolor='black', lw=heavy_linewidth))
+            # Dimensions of each mini-tile.
+            tile_w = cell_size / n_cols
+            tile_h = cell_size / n_rows
+            # Loop over each ligand (mini-tile).
+            for k in range(n_ligands):
+                mini_row = k // n_cols
+                mini_col = k % n_cols
+                tile_x = cell_x + mini_col * tile_w
+                # Remove the inversion of mini_row to flip the order relative to the legend.
+                tile_y = cell_y + mini_row * tile_h
+                v = data[i, j, k]
+                base = np.array(base_colors[k][:3])  # Drop alpha if present.
+                color = (1 - v) * np.array([1, 1, 1]) + v * base
+                ax.add_patch(patches.Rectangle((tile_x, tile_y), tile_w, tile_h, 
+                                               facecolor=color, edgecolor='gray', lw=light_linewidth))
+    
+    # Set tick positions: columns on x-axis and rows on y-axis.
+    xticks = np.arange(cell_size/2, n_cols_data * cell_size, cell_size)
+    yticks = np.arange(cell_size/2, n_rows_data * cell_size, cell_size)
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    # For rectangular grids, use dim_1_names for x-axis (columns) and dim_0_names for y-axis (rows).
+    ax.set_xticklabels(dim_1_names,rotation=90)
+    ax.set_yticklabels(dim_0_names)
+    ax.tick_params(axis='both', which='major', labelsize=font_size)
+    
+    # Create a legend with color patches for each ligand.
+    legend_handles = [patches.Patch(color=base_colors[k], label=dim_2_names[k]) 
+                      for k in range(n_ligands)]
+    # 1) get heatmap bbox, grid dims, and colors
+    pos       = ax.get_position()   # [left, bottom, width, height] in fig‐fraction
+    # n_rows, n_cols already computed for your mini-tiles
+    # base_colors is your list of RGBA tuples
+    # dim_2_names is your list of labels
+    # font_size is already set
+
+    # 2) pick a real‐world square size (in inches) for each text cell
+
+    # 3) get figure dimensions (in inches)
+    fig_w, fig_h = fig.get_size_inches()
+
+    # 4) compute legend axes size in fig‐fraction
+    legend_w = (legend_square_size * n_cols) / fig_w
+    legend_h = (legend_square_size * n_rows * 0.4) / fig_h
+
+    # 5) compute lower‐left corner so legend is vertically centered
+    x0 = pos.x1 + legend_pad
+    y0 = pos.y0 + (pos.height - legend_h) / 2
+
+    # 6) create tiny axes for the grid of labels
+    legend_ax = fig.add_axes([x0, y0, legend_w, legend_h])
+    legend_ax.set_xlim(0, n_cols)
+    legend_ax.set_ylim(0, n_rows)
+    legend_ax.invert_yaxis()   # row 0 at top
+    legend_ax.axis('off')      # no ticks, no frame
+
+    # 7) draw each label, colored appropriately
+    for k, name in enumerate(dim_2_names):
+        col = k % n_cols
+        row = k // n_cols
+        legend_ax.text(
+            col + 0.5, row + 0.5, name,
+            ha='center', va='center',
+            rotation=0,                 # horizontal text
+            color=base_colors[k],       # your ligand color
+            fontsize=legend_font_size,
+            fontweight='bold',
+            path_effects=[pe.withStroke(linewidth=0.3, foreground="black")],
+            wrap=True                    # if very long, wrap inside cell
+        )
+
+    # 8) save with tight bbox so nothing is clipped
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(
+            save_path,
+            format='svg',
+            bbox_inches='tight',
+            pad_inches=0.1
+        )
+    plt.show()
 
 
 def plot_tricolor_heatmap(data, x_tick_labels=None, y_tick_labels=None,color_axes=['Blue','Red','Yellow'],
@@ -899,104 +1208,203 @@ def plot_tricolor_heatmap(data, x_tick_labels=None, y_tick_labels=None,color_axe
         plt.savefig(save_prefix+'_legend.svg')
     plt.show()
 
-def plot_tile_heatmap(data, dim_0_names, dim_1_names, dim_2_names, mini_grid_dims=None, 
-                      cell_size=1, cmap_name='tab20', heavy_linewidth=2, light_linewidth=0.2,save_path=None):
+def boost_to_black(rgb, exponent=2.0):
     """
-    Plot a nested heatmap where each cell (grid pair) is subdivided into mini tiles
-    representing ligand–receptor interaction strengths, and adds a legend for ligands.
+    rgb: array (..., 3) in [0,1]
+    exponent > 1 makes darkening kick in more sharply at low brightness.
     
-    Parameters
-    ----------
-    data : np.ndarray
-        3D array of shape (n_rows, n_cols, n_ligands) with values in [0, 1].
-    dim_0_names : list of str
-        Labels for the rows (y-axis). Length should equal n_rows.
-    dim_1_names : list of str
-        Labels for the columns (x-axis). Length should equal n_cols.
-    dim_2_names : list of str
-        Names for each ligand (used to assign colors and for the legend).
-    mini_grid_dims : tuple of ints, optional
-        Dimensions (rows, cols) of the mini grid inside each cell. If None, the grid
-        will be as square as possible.
-    cell_size : float, optional
-        The size of each cell in the heatmap.
-    cmap_name : str, optional
-        Name of a qualitative colormap (e.g. 'tab20') to assign each ligand a unique base color.
-    heavy_linewidth : float, optional
-        Line width for the boundaries between cells.
-    light_linewidth : float, optional
-        Line width for the subgrid (mini-tile) borders.
+    We compute per‐pixel mean brightness m = (r+g+b)/3,
+    then compute a “darkening weight” alpha = (1 - m)**exponent,
+    and finally blend each channel c -> c' = c * (1 - alpha).
     """
-    n_rows_data, n_cols_data, n_ligands = data.shape
+    # mean brightness in [0,1]
+    m = np.mean(rgb, axis=-1, keepdims=True)    # shape (...,1)
+    alpha = (1 - m) ** exponent                  # darkening strength
+    return np.clip(rgb * (1 - alpha), 0, 1)
 
-    # Validate that provided labels match the data dimensions.
-    if len(dim_0_names) != n_rows_data:
-        raise ValueError(f"Expected {n_rows_data} row labels (dim_0_names), but got {len(dim_0_names)}.")
-    if len(dim_1_names) != n_cols_data:
-        raise ValueError(f"Expected {n_cols_data} column labels (dim_1_names), but got {len(dim_1_names)}.")
 
-    # Determine mini-grid dimensions (rows x cols) for subdividing each cell.
-    if mini_grid_dims is None:
-        n_rows = int(np.floor(np.sqrt(n_ligands)))
-        n_rows = max(n_rows, 1)
-        n_cols = int(np.ceil(n_ligands / n_rows))
+def compute_tricolor_rgb_4d(data,rby=True,black_exp=1.0):
+    """
+    data: np.ndarray, shape (3, n_rows, n_cols, n_ligands), values in [0,1].
+    Returns: np.ndarray of shape (n_rows, n_cols, n_ligands, 3), with
+      R = clip(1 - a,      0,1)
+      G = clip(1 - (a + b),0,1)
+      B = clip(1 - (b + c),0,1)
+    exactly as in your original heatmap.
+    """
+    data = np.asarray(data)
+    if data.ndim != 4 or data.shape[0] != 3:
+        raise ValueError("Expected data of shape (3, rows, cols, ligands).")
+    if np.any(data < 0) or np.any(data > 1):
+        raise ValueError("All values must lie in [0,1].")
+
+    a = data[0]   # species 1
+    b = data[1]   # species 2
+    c = data[2]   # species 3
+    if rby:
+        R = np.clip(1 - a,       0, 1)
+        G = np.clip(1 - (a + b), 0, 1)
+        B = np.clip(1 - (b + c), 0, 1)
     else:
-        n_rows, n_cols = mini_grid_dims
+        R = np.clip(a,       0, 1)
+        G = np.clip(b, 0, 1)
+        B = np.clip(c, 0, 1)
 
-    # Get base colors for each ligand using the specified qualitative colormap.
-    cmap = plt.get_cmap(cmap_name)
-    base_colors = [cmap(i / n_ligands) for i in range(n_ligands)]
-    
-    # Create figure and axis.
-    fig, ax = plt.subplots(figsize=(n_cols_data * cell_size, n_rows_data * cell_size))
-    ax.set_xlim(0, n_cols_data * cell_size)
-    ax.set_ylim(0, n_rows_data * cell_size)
-    ax.set_aspect('equal')
-    # Invert y-axis so that the first row appears at the top.
-    ax.invert_yaxis()
-    
-    # Loop over each cell in the grid.
-    for i in tqdm.tqdm(range(n_rows_data)):
-        for j in range(n_cols_data):
-            cell_x = j * cell_size
-            cell_y = i * cell_size
-            # Draw heavy border for the cell.
-            ax.add_patch(patches.Rectangle((cell_x, cell_y), cell_size, cell_size, 
-                                           fill=False, edgecolor='black', lw=heavy_linewidth))
-            # Dimensions of each mini-tile.
-            tile_w = cell_size / n_cols
-            tile_h = cell_size / n_rows
-            # Loop over each ligand (mini-tile).
-            for k in range(n_ligands):
-                mini_row = k // n_cols
-                mini_col = k % n_cols
-                tile_x = cell_x + mini_col * tile_w
-                # Remove the inversion of mini_row to flip the order relative to the legend.
-                tile_y = cell_y + mini_row * tile_h
-                v = data[i, j, k]
-                base = np.array(base_colors[k][:3])  # Drop alpha if present.
-                color = (1 - v) * np.array([1, 1, 1]) + v * base
-                ax.add_patch(patches.Rectangle((tile_x, tile_y), tile_w, tile_h, 
-                                               facecolor=color, edgecolor='gray', lw=light_linewidth))
-    
-    # Set tick positions: columns on x-axis and rows on y-axis.
-    xticks = np.arange(cell_size/2, n_cols_data * cell_size, cell_size)
-    yticks = np.arange(cell_size/2, n_rows_data * cell_size, cell_size)
-    ax.set_xticks(xticks)
-    ax.set_yticks(yticks)
-    # For rectangular grids, use dim_1_names for x-axis (columns) and dim_0_names for y-axis (rows).
-    ax.set_xticklabels(dim_1_names,rotation=90)
-    ax.set_yticklabels(dim_0_names)
-    
-    # Create a legend with color patches for each ligand.
-    legend_handles = [patches.Patch(color=base_colors[k], label=dim_2_names[k]) 
-                      for k in range(n_ligands)]
-    ax.legend(handles=legend_handles, bbox_to_anchor=(1.05, 1), loc='upper left', title='Ligands')
-    
+    # stack into last axis → shape (rows, cols, ligands, 3)
+    return boost_to_black(np.stack([R, G, B], axis=-1), exponent=black_exp)
+
+def plot_tricolor_legend_4d(color_axes=['Blue','Red','Yellow'],
+                            legend_figsize=(6,6),
+                            N=200_000,rby=True,black_exp=1.,
+                            save_prefix=None):
+    """
+    Ternary legend sampling from compute_tricolor_rgb_4d.
+
+    color_axes : names for the three vertices
+    legend_figsize : figure size
+    N : number of random samples in the simplex
+    save_prefix : if given, legend is saved to '{save_prefix}_legend.svg'
+    """
+    def project(a, b, c):
+        mu = (a + b + c) / 3.0
+        a_p, b_p, c_p = a - mu, b - mu, c - mu
+        x = (math.sqrt(3)/2) * (b_p - c_p)
+        y = a_p - 0.5 * (b_p + c_p)
+        return x, y
+
+    # 1) sample N points in the simplex a+b+c<=1
+    pts = []
+    while len(pts) < N:
+        pt = np.random.rand(3)
+        if pt.sum() <= 1:
+            pts.append(pt)
+    pts = np.array(pts).T         # shape (3, K)
+    K = pts.shape[1]
+
+    # 2) reshape to a (3,1,1,K) array for compute_tricolor_rgb_4d
+    data4d = pts.reshape(3, 1, 1, K)
+
+    # 3) compute RGB via your 4D helper
+    colors4d = compute_tricolor_rgb_4d(data4d,rby=rby,black_exp=black_exp)  # shape (1,1,K,3)
+    colors = colors4d[0, 0, :, :]               # shape (K,3)
+
+    # 4) project points into 2D
+    xy = np.array([project(*pts[:, i]) for i in range(K)])
+    x_vals, y_vals = xy[:, 0], xy[:, 1]
+
+    # 5) get the three pure‐color vertices
+    xb, yb   = project(1, 0, 0)  # species1=1 → blue vertex
+    xr, yr   = project(0, 1, 0)  # species2=1 → red
+    xy2, yy2 = project(0, 0, 1)  # species3=1 → yellow
+
+    # 6) plot
+    plt.figure(figsize=legend_figsize)
+    plt.scatter(x_vals, y_vals, c=colors, s=8, marker='s',
+                edgecolors='none', alpha=0.5)
+
+    # triangle border
+    tri_x = [xb, xr, xy2, xb]
+    tri_y = [yb, yr, yy2, yb]
+    plt.plot(tri_x, tri_y, color='black', lw=1.5)
+
+    # annotations
+    plt.text(xb, yb + 0.05, f"[max,0,0]\n({color_axes[0]})",
+             color='blue', ha='center', va='bottom')
+    plt.text(xr, yr - 0.05, f"[0,max,0]\n({color_axes[1]})",
+             color='red', ha='center', va='top')
+    plt.text(xy2, yy2 - 0.05, f"[0,0,max]\n({color_axes[2]})",
+             color='goldenrod', ha='center', va='top')
+
+    # white center
+    # plt.scatter(0, 0, s=50, color='white', edgecolor='black', zorder=10)
+    # plt.text(0, 0.05, "[0,0,0]", color='black',
+    #          ha='center', va='bottom')
+
+    plt.axis('off')
+    plt.gca().set_aspect('equal')
     plt.tight_layout()
-    if save_path is not None:
+    if save_prefix:
+        plt.savefig(f"{save_prefix}_legend.png")
+    plt.show()
+
+
+def plot_tile_heatmap_rgb(tile_colors,
+                      dim_0_names,
+                      dim_1_names,
+                      dim_2_names,
+                      mini_grid_dims=None,
+                      cell_size=1,
+                      heavy_linewidth=2,
+                      light_linewidth=0.2,
+                      font_size=10,
+                      save_path=None):
+    """
+    Plot a nested heatmap from a precomputed RGB array.
+
+    tile_colors: ndarray of shape (n_rows, n_cols, n_ligands, 3)
+    dim_0_names: list of length n_rows
+    dim_1_names: list of length n_cols
+    dim_2_names: list of length n_ligands  (only used for tile ordering)
+    """
+    n_rows, n_cols, n_ligands, _ = tile_colors.shape
+
+    if len(dim_0_names) != n_rows:
+        raise ValueError(f"Expected {n_rows} row labels, got {len(dim_0_names)}")
+    if len(dim_1_names) != n_cols:
+        raise ValueError(f"Expected {n_cols} col labels, got {len(dim_1_names)}")
+    if len(dim_2_names) != n_ligands:
+        raise ValueError(f"Expected {n_ligands} ligand names, got {len(dim_2_names)}")
+
+    # choose mini-grid layout
+    if mini_grid_dims is None:
+        nr = max(int(np.floor(np.sqrt(n_ligands))), 1)
+        nc = int(np.ceil(n_ligands / nr))
+    else:
+        nr, nc = mini_grid_dims
+
+    fig, ax = plt.subplots(figsize=(n_cols * cell_size, n_rows * cell_size))
+    ax.set_xlim(0, n_cols * cell_size)
+    ax.set_ylim(0, n_rows * cell_size)
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+
+    tile_w = cell_size / nc
+    tile_h = cell_size / nr
+
+    for i in range(n_rows):
+        for j in range(n_cols):
+            x0, y0 = j * cell_size, i * cell_size
+            # heavy border
+            ax.add_patch(plt.Rectangle((x0, y0),
+                                       cell_size, cell_size,
+                                       fill=False,
+                                       edgecolor='black',
+                                       lw=heavy_linewidth))
+            for k in range(n_ligands):
+                r, c = divmod(k, nc)
+                xx = x0 + c * tile_w
+                yy = y0 + r * tile_h
+                color = tile_colors[i, j, k]
+                ax.add_patch(plt.Rectangle((xx, yy),
+                                           tile_w, tile_h,
+                                           facecolor=color,
+                                           edgecolor='gray',
+                                           lw=light_linewidth))
+
+    # ticks & labels
+    xt = np.arange(cell_size/2, n_cols * cell_size, cell_size)
+    yt = np.arange(cell_size/2, n_rows * cell_size, cell_size)
+    ax.set_xticks(xt)
+    ax.set_yticks(yt)
+    ax.set_xticklabels(dim_1_names, rotation=90)
+    ax.set_yticklabels(dim_0_names)
+    ax.tick_params(axis='both', which='major', labelsize=font_size)
+
+    plt.tight_layout()
+    if save_path:
         plt.savefig(save_path)
     plt.show()
+
 
 def get_prerank_custom_list(input_series,gene_list_dict,**kwargs):
     """

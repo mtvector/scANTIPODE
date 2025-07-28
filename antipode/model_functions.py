@@ -36,6 +36,9 @@ def safe_softmax(x,dim=-1,eps=1e-10):
 def minmax(x):
     return(x.min(),x.max())
 
+def prop_zeros(x,axis=-1):
+    return(np.mean(x>0.,axis=axis))
+
 def param_store_to_numpy():
     store={}
     for name in pyro.get_param_store():
@@ -196,20 +199,35 @@ def group_aggr_anndata(ad, category_column_names, agg_func=np.mean, layer=None, 
     
     return result, category_orders
 
-def get_real_leaf_means(adata,discov_key,leaf_key,layer=None):
+def get_real_leaf_means(adata,discov_key,leaf_key,layer=None, count_threshold=1000):
     '''convenience function wraps aggregation and safe_log_transform. Returns [discov_levels,leaf_clusters,genes] array of log means'''
     aggr_means=group_aggr_anndata(adata,[discov_key,leaf_key],layer=layer,normalize=True)
-    aggr_sums=group_aggr_anndata(adata,[leaf_key],layer=layer,normalize=False,agg_func=np.sum)
-    log_real_means=safe_log_transform(aggr_means[0],aggr_sums[0].sum(-1)[np.newaxis,...,np.newaxis])
+    aggr_sums=group_aggr_anndata(adata,[discov_key,leaf_key],layer=layer,normalize=False,agg_func=np.sum)
+    log_real_means=safe_log_transform(aggr_means[0],aggr_sums[0].sum(-1)[...,np.newaxis], count_threshold=1000)
     return log_real_means, aggr_means[1]
-    
-def safe_log_transform(x, sums=None):
+
+def safe_log_transform(x, sums=None, count_threshold=1000):
+    x = np.asarray(x)
     if sums is not None:
-        offset = 0.5 / (sums+1.) #naive expected value halfway between smallest observable value and 0
+        sums = np.asarray(sums) 
+        offset = 0.5 / (sums + 1.) # Geometric distribution memorylessness result
+        result = np.log(x + offset)
+        if count_threshold is not None:
+            mask = sums > count_threshold
+            result = np.where(mask, result, np.nan)
     else:
         nonzero = x[x > 0]
-        offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10 #Sets to just below lowest observed value in dataset (extreme)
-    return np.log(x + offset)
+        offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10
+        result = np.log(x + offset)
+    return result
+
+# def safe_log_transform(x, sums=None):
+#     if sums is not None:
+#         offset = 0.5 / (sums+1.) #naive expected value halfway between smallest observable value and 0
+#     else:
+#         nonzero = x[x > 0]
+#         offset = nonzero.min() * 0.9 if nonzero.size > 0 else 1e-10 #Sets to just below lowest observed value in dataset (extreme)
+#     return np.log(x + offset)
 
 def pandas_numericategorical(col):
     col = col.astype('category')
