@@ -34,9 +34,10 @@ conda install jax jaxlib -c conda-forge
 cd scANTIPODE
 pip install -e .
 
-Additional analysis stuff
+Additional analysis stuff/phylo mode
 
-pip install gseapy liana
+conda install biopython
+pip install gseapy
 
 ```
 
