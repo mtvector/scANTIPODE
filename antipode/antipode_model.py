@@ -83,7 +83,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.num_seccov = adata.obsm[self.seccov_key].shape[-1] if self.seccov_key != 'seccov_dummy' else 1
         
         self._setup_adata_manager_store: dict[str, type[scvi.data.AnnDataManager]] = {}
-        self.num_var = adata.layers[layer].shape[-1]
+        self.num_var = adata.shape[-1]
         self.num_latent = num_latent
         self.scale_factor = 1.0#scale_factor if scale_factor is not None else 2e2 / (self.num_var * num_particles * num_latent)
         self.num_batch_embed = num_batch_embed

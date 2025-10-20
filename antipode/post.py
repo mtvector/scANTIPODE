@@ -7,66 +7,6 @@ import tqdm
 from . import plotting
 from .antipode_model import ANTIPODE
 
-def select_marker_genes(marker_df, expr_df, threshold, marker=True, other_quantile=0.95):
-    """
-    Select marker or antimarker genes for each cluster.
-
-    For marker==True (markers):
-      - marker_df should be computed with a high quantile (e.g. 0.95 or 0.99).
-      - For each cluster, genes are sorted in descending order (largest difference first).
-      - The function returns the first gene whose expression in the cluster exceeds `threshold`.
-      - If none pass, the top-ranked gene is returned.
-
-    For marker==False (antimarkers):
-      - marker_df should be computed with a low quantile (e.g. 0.1).
-      - Genes are sorted in ascending order (lowest difference first).
-      - For each candidate gene, the expression in all other clusters is examined.
-      - If `other_threshold` is provided, the gene is chosen only if the specified quantile
-        (default 0.95) of its expression in the other clusters exceeds `other_threshold`.
-      - If no gene meets this filter, the top candidate (i.e. the gene with the minimum score)
-        is returned.
-    
-    :param marker_df: DataFrame from get_quantile_markers (clusters as rows, genes as columns).
-    :param expr_df: DataFrame of the original expression values (clusters as rows, genes as columns).
-    :param threshold: In 'marker' mode, the minimum expression required in the target cluster.
-                      In 'antimarker' mode, not used.
-    :param marker: Boolean to use markers or antimarker strategy
-    :param other_quantile: In 'antimarker' mode, the quantile of the non-target clusters’ expression to consider.
-    :return: Dictionary mapping cluster -> selected gene.
-    """
-    selected_markers = {}
-    clusters = marker_df.index
-
-    for cluster in clusters:
-        if marker:
-            # For markers, higher score is better.
-            sorted_genes = marker_df.loc[cluster].sort_values(ascending=False)
-            top_gene = sorted_genes.index[0]
-            chosen_gene = None
-            for gene in sorted_genes.index:
-                if expr_df.loc[cluster, gene] > threshold:
-                    chosen_gene = gene
-                    break
-            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
-
-        else:
-            # For antimarkers, lower score is better.
-            sorted_genes = marker_df.loc[cluster].sort_values(ascending=True)
-            top_gene = sorted_genes.index[0]
-            chosen_gene = None
-            # Identify the other clusters
-            other_clusters = expr_df.index.difference([cluster])
-            for gene in sorted_genes.index:
-                other_expr = expr_df.loc[other_clusters, gene]
-                # If no threshold is provided, pick the top candidate.
-                # Otherwise, require that a high quantile of expression in others exceeds the threshold.
-                if (threshold is None) or (np.quantile(other_expr, other_quantile) > threshold):
-                    chosen_gene = gene
-                    break
-            selected_markers[cluster] = chosen_gene if chosen_gene is not None else top_gene
-
-    return selected_markers
-
 def moving_average_values(x,y,window_size=1001):
     moving_average = antipode.plotting.moving_average(y[np.argsort(x)],window_size)
     return(np.sort(x[int(window_size/2):-int(window_size/2)]),moving_average)
