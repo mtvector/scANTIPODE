@@ -7,7 +7,7 @@
 
 **NOTICE: This package will be under heavy development until publication, and will be subject to changes until release 0.1**
 
-
+If you have issues with trying the method or want to request additional features, please raise an issue and I will prioritize accordingly!
 
 
 **S**ingle **C**ell **A**ncestral **N**ode **T**axonomy **I**nference by **P**artitioning **O**f **D**ifferential **E**xpression. The model is an extension of the SCVI paradigm--a structured generative, variational inference model developed for the simultaneous analysis (DE) and categorization (taxonomy generation) of cell types across evolution (or now any covariate) using single-cell RNA-seq data. Long ago it began as a hack of a simplified model of [scANVI](https://pyro.ai/examples/scanvi.html) and is built on the pytorch-based PPL [pyro](https://pyro.ai/). The model acts as an integration method, that learns interpretable differential expression in the process. Note that this means ANTIPODE will fail to integrate datasets of different datasets, or datasets with large disparities in quality or gene mean dispersions.
@@ -21,7 +21,7 @@ The complete procedure runs in 3 phases (but can also run fully supervised using
 3. **The Free Phase:** All parameters are released for unconstrained learning.
 
 
-You can read about the generative model [here](https://www.overleaf.com/read/nmcmcjtvmfcb#acf7a4). You can look at example runs [here](examples/outputs/).
+You can read about the generative model as part of the biorxiv [here](https://www.biorxiv.org/content/10.1101/2025.10.18.683238v1). You can look at example runs [here](real_examples/).
 
 
 ## Installation
