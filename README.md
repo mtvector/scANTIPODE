@@ -20,12 +20,16 @@ You can read about the generative model in the publication and supplement [here]
 
 
 ## Installation
-First create a conda environment with python >= 3.10, then
+First create a conda environment with python >= 3.10, then:
+
 ```
 To install the package from PyPI:
     pip install antipode
+```
 
+Additionally:
 
+```
 For development, clone the repository and run:
     conda create -n antipode -c rapidsai -c conda-forge -c nvidia  \
         rapids=24.12 python=3.12 'cuda-version>=12.0,<=12.5' \
