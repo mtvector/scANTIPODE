@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antipode"
-version = "0.1"
+version = "0.1.0"
 description = "Simultaneous integration, differential expression and clustering of single cell RNAseq data using pyro-powered variational inference."
 readme = { file = "README.md", "content-type" = "text/markdown" }
 requires-python = ">=3.10"
@@ -32,11 +32,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-extras = [
-    "biopython",
-    "gseapy",
-    "PyComplexHeatmap",
-    "glasbey",
+extras = ["biopython", "gseapy", "PyComplexHeatmap", "glasbey"]
+rapids = [
+    "cudf-cu12",
+    "pylibcudf-cu12",
+    "cuml-cu12",
+    "cupy-cuda12"
 ]
 
 [project.urls]
