@@ -28,11 +28,12 @@ dependencies = [
     "seaborn",
     "scikit-learn",
     "legacy-cgi",
-    "ete3"
+    "ete3",
+    "glasbey"
 ]
 
 [project.optional-dependencies]
-extras = ["biopython", "gseapy", "PyComplexHeatmap", "glasbey"]
+extras = ["biopython", "gseapy", "PyComplexHeatmap"]
 rapids = [
     "cudf-cu12",
     "pylibcudf-cu12",
