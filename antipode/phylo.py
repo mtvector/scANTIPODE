@@ -1,5 +1,9 @@
+try:
+    from Bio import Phylo
+except:
+    print('no phylo')
+
 from io import StringIO
-from Bio import Phylo
 import numpy as np
 import torch
 from .model_functions import *

@@ -33,12 +33,12 @@ dependencies = [
 
 [project.optional-dependencies]
 extras = ["biopython", "gseapy", "PyComplexHeatmap", "glasbey"]
-rapids = [
-    "cudf-cu12",
-    "pylibcudf-cu12",
-    "cuml-cu12",
-    "cupy-cuda12"
-]
+# rapids = [
+#     "cudf-cu12",
+#     "pylibcudf-cu12",
+#     "cuml-cu12",
+#     "cupy-cuda12"
+# ]
 
 [project.urls]
 "Source" = "https://github.com/mtvector/scANTIPODE"
