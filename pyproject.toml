@@ -28,7 +28,8 @@ dependencies = [
     "seaborn",
     "scikit-learn",
     "legacy-cgi",
-    "ete3"
+    "ete3",
+    "glasbey"
 ]
 
 [project.optional-dependencies]
@@ -38,7 +39,6 @@ extras = ["biopython", "gseapy", "PyComplexHeatmap", "glasbey"]
 #     "pylibcudf-cu12",
 #     "cuml-cu12",
 #     "cupy-cuda12"
-# ]
 
 [project.urls]
 "Source" = "https://github.com/mtvector/scANTIPODE"
