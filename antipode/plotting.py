@@ -221,13 +221,14 @@ def plot_d_hists(antipode_model, bins=200, save=False, ecdf=False):
     plt.show()
    
     plt.figure()
+    discov_da = param_store.get('discov_da', param_store.get('discov_constitutive_de'))
     if ecdf:
         for i in range(len(categories)):
-            seaborn.ecdfplot(x=(param_store['discov_constitutive_de']-param_store['discov_constitutive_de'].mean(0))[i, ...].flatten(), color=colors[i],
+            seaborn.ecdfplot(x=(discov_da-discov_da.mean(0))[i, ...].flatten(), color=colors[i],
                               label=categories[i])
     else:
         for i in range(len(categories)):
-            seaborn.histplot((param_store['discov_constitutive_de']-param_store['discov_constitutive_de'].mean(0))[i, ...].flatten(), color=colors[i],
+            seaborn.histplot((discov_da-discov_da.mean(0))[i, ...].flatten(), color=colors[i],
                               bins=bins, label=categories[i], stat='proportion')
     plt.legend()
     plt.title('DA')

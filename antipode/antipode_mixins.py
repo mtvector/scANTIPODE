@@ -415,13 +415,18 @@ class AntipodeTrainingMixin:
             
             prop_locs=prop_taxon@pstore['locs']
             prop_cluster_intercept=prop_taxon@pstore['cluster_intercept']
-            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+torch.mean(pstore['discov_constitutive_de'],0,keepdims=True))
+            discov_constitutive_intercept = pstore.get(
+                'discov_constitutive_intercept',
+                torch.zeros(self.num_var, device=pstore['locs'].device),
+            )
+            discov_da = pstore.get('discov_da', pstore.get('discov_constitutive_de'))
+            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+torch.mean(discov_da,0,keepdims=True)+discov_constitutive_intercept)
             cluster_params=cluster_params[cluster_index,:]
             
             #Need to propagate multilayer tree to discovs
             prop_discov_di = torch.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
             prop_discov_dm = torch.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
-            discov_cluster_params=(torch.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+pstore['discov_constitutive_de'].unsqueeze(1)))-pstore['softmax_shift']
+            discov_cluster_params=(torch.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+discov_da.unsqueeze(1)+discov_constitutive_intercept.unsqueeze(0).unsqueeze(1)))-pstore['softmax_shift']
             return torch.tensor(discov_cluster_params),torch.tensor(cluster_params), cluster_labels,var_labels,(torch.tensor(prop_taxon), torch.tensor(prop_locs),torch.tensor(prop_discov_di),torch.tensor(prop_discov_dm))
         else:
             pstore=adata.uns[prefix+'param_store']
@@ -440,13 +445,18 @@ class AntipodeTrainingMixin:
             
             prop_locs=prop_taxon@pstore['locs']
             prop_cluster_intercept=prop_taxon@pstore['cluster_intercept']
-            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+np.mean(pstore['discov_constitutive_de'],0,keepdims=True))
+            discov_da = pstore.get('discov_da', pstore.get('discov_constitutive_de'))
+            discov_constitutive_intercept = pstore.get(
+                'discov_constitutive_intercept',
+                np.zeros(self.num_var, dtype=discov_da.dtype),
+            )
+            cluster_params=((prop_locs@pstore['z_decoder_weight'])+prop_cluster_intercept+np.mean(discov_da,0,keepdims=True)+discov_constitutive_intercept)
             cluster_params=cluster_params[cluster_index,:]
             
             #Need to propagate multilayer tree to discovs
             prop_discov_di = np.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
             prop_discov_dm = np.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
-            discov_cluster_params=(np.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+np.expand_dims(pstore['discov_constitutive_de'],1)))-pstore['softmax_shift']
+            discov_cluster_params=(np.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+np.expand_dims(discov_da,1)+discov_constitutive_intercept[np.newaxis,np.newaxis,:]))-pstore['softmax_shift']
             zero_mask = (adata.obs.groupby(self.discov_key)[leaf_level].value_counts().unstack().loc[:,cluster_labels]>=cluster_count_threshold).to_numpy()
             return discov_cluster_params,cluster_params, cluster_labels,var_labels, 1/zero_mask[...,np.newaxis],(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm)
         
@@ -657,7 +667,11 @@ class AntipodeTrainingMixin:
         # discov_dc = pstore["discov_dc"]                    # shape: (num_discov, num_latent, num_genes)
         # discov_di = pstore["discov_di"]                    # shape: (num_discov, sum_of_levels, num_genes)
         # discov_dm = pstore["discov_dm"]                    # shape: (num_discov, sum_of_levels, num_latent)
-        discov_constitutive_de = pstore["discov_constitutive_de"].detach()  # shape: (num_discov, num_genes)
+        discov_da = pstore.get("discov_da", pstore.get("discov_constitutive_de")).detach()  # shape: (num_discov, num_genes)
+        discov_constitutive_intercept = pstore.get(
+            "discov_constitutive_intercept",
+            torch.zeros(self.num_var, device=device),
+        )
         softmax_shift = pstore["softmax_shift"].detach()            # shape: scalar or (1,)
         
         # locs=self.zl.model_sample(log_residuals)
@@ -674,8 +688,8 @@ class AntipodeTrainingMixin:
         # shape => (n_clusters, num_genes)
     
         cluster_params = (prop_locs @ z_decoder_weight) + prop_cluster_intercept + torch.mean(
-            discov_constitutive_de, dim=0, keepdim=True
-        )
+            discov_da, dim=0, keepdim=True
+        ) + discov_constitutive_intercept
         prop_discov_di = torch.einsum("pc, dcg -> dpg", prop_taxon, discov_di)
         prop_discov_dm = torch.einsum("pc, dcm -> dpm", prop_taxon, discov_dm)
     
@@ -692,12 +706,12 @@ class AntipodeTrainingMixin:
         pci_expanded = prop_cluster_intercept.unsqueeze(0)  # => (1, n_clusters, num_genes)
         di_plus_ci = pci_expanded + prop_discov_di  # shape => (num_discov, n_clusters, num_genes)
     
-        # discov_constitutive_de => shape (num_discov, num_genes)
+        # discov_da => shape (num_discov, num_genes)
         # unsqueeze(1) => (num_discov, 1, num_genes) => broadcast
-        dcd_unsqueezed = discov_constitutive_de.unsqueeze(1)
+        dcd_unsqueezed = discov_da.unsqueeze(1)
     
         discov_cluster_params = (
-            discov_cluster_expr + di_plus_ci + dcd_unsqueezed
+            discov_cluster_expr + di_plus_ci + dcd_unsqueezed + discov_constitutive_intercept.unsqueeze(0).unsqueeze(1)
         ) - softmax_shift  # shape => (num_discov, n_clusters, num_genes)
 
         discov_cluster_params = discov_cluster_params[:,self.obs_leaves,:]
@@ -902,6 +916,18 @@ class AntipodeSaveLoadMixin:
                     pyro.get_param_store().__delitem__(k)
                 except:
                     print(k,'not deleted')
+        pstore = pyro.get_param_store()
+        if 'discov_constitutive_de' in pstore and 'discov_da' not in pstore:
+            pstore['discov_da'] = pstore['discov_constitutive_de']
+            try:
+                pstore.__delitem__('discov_constitutive_de')
+            except KeyError:
+                pass
+        if 'discov_constitutive_intercept' not in pstore:
+            pstore['discov_constitutive_intercept'] = torch.zeros(
+                model.num_var,
+                device=device,
+            )
         return model
 
     def save(

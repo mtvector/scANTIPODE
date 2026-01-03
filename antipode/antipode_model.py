@@ -50,7 +50,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     num_batch_embed (int): Number of embedding dimensions for batch effects. Defaults to 2. 
     scale_factor (float, optional): Factor for scaling the data normalization. Inferred from data if None. [DANGER]
     prior_scale (float): Scale for the Laplace prior distributions. Defaults to 100. [DANGER]
-    dcd_prior (float, optional): Scale for discov_constitutive_de. Use this for missing genes (set to large negative value and rest 0. Zeros if None.
+    discov_da_init (float, optional): Initial values for discov_da (e.g., per-species means).
+    discov_da_prior_M (float): Negative constant for prior mean when genes are never detected.
+    discov_da_zero_eps (float): Threshold below which init is treated as zero for the prior mask.
+    dcd_prior (float, optional): Deprecated alias for discov_da_init.
     use_psi (bool): Whether to utilize psi continuous variation parameter. Defaults to True.
     use_q_score (bool): Whether to use q continuous "quality" scores. Defaults to True.
     dist_normalize (bool): EXPERIMENTAL. Whether to apply distance normalization. Defaults to False.
@@ -63,7 +66,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     """
 
     def __init__(self, adata, discov_pair, batch_pair, layer, seccov_key='seccov_dummy', level_sizes=[1,10,100],
-                 num_latent=50, scale_factor=None, prior_scale=100, dcd_prior=None, sampler_category=None, theta_prior=10.,
+                 num_latent=50, scale_factor=None, prior_scale=100, discov_da_init=None, discov_da_prior_M=20.0, discov_da_zero_eps=1e-8, sampler_category=None, theta_prior=10., dcd_prior=None,
                  loc_as_param=True,zdw_as_param=True, intercept_as_param=False, seccov_as_param=True,use_q_score=False, use_psi=True, psi_levels=[True],
                  num_batch_embed=2,  min_theta=1e-1, scale_init_val=0.01, bi_depth=2, z_transform=None, dist_normalize=False,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],anc_prior_scalar=torch.tensor(0.5)):
@@ -109,7 +112,17 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.min_theta = min_theta
         self.anc_prior_scalar = anc_prior_scalar
         
-        self.dcd_prior = torch.zeros((self.num_discov,self.num_var)) if dcd_prior is None else dcd_prior#Use this for 
+        if discov_da_init is None and dcd_prior is not None:
+            discov_da_init = dcd_prior
+        self.discov_da_init = torch.zeros((self.num_discov, self.num_var)) if discov_da_init is None else discov_da_init
+        self.discov_da_prior_M = discov_da_prior_M
+        self.discov_da_zero_eps = discov_da_zero_eps
+        # Prior mean mask: 0 where detected, -M where never detected.
+        self.discov_da_prior_loc = torch.where(
+            self.discov_da_init.abs() > self.discov_da_zero_eps,
+            torch.zeros_like(self.discov_da_init),
+            -self.discov_da_prior_M * torch.ones_like(self.discov_da_init),
+        )
                 
         # Initialize plates to be used during sampling
         self.var_plate = pyro.plate('var_plate',self.num_var,dim=-1)
@@ -136,6 +149,9 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.ci=MAPLaplaceModule(self,'cluster_intercept',[self.num_labels, self.num_var],[self.label_plate,self.var_plate],param_only=self.intercept_as_param)
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],
                                  [self.discov_plate,self.latent_plate2,self.var_plate],scale_multiplier=self.anc_prior_scalar)
+        self.discov_da=MAPLaplaceModule(self,'discov_da',[self.num_discov,self.num_var],
+                                 [self.discov_plate,self.var_plate],init_val=self.discov_da_init,
+                                 prior_loc=self.discov_da_prior_loc,scale_multiplier=self.anc_prior_scalar)
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],
                                   [self.latent_plate2,self.var_plate],
                                   init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=self.zdw_as_param)
@@ -244,7 +260,11 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             discov_mul = pyro.param("discov_mul", s.new_ones(self.num_discov,1),constraint=constraints.positive) if self.dist_normalize else s.new_ones(self.num_discov,1)
             cur_discov_mul = torch.einsum('do,bd->bo',discov_mul, discov_ind) if self.design_matrix else discov_mul[discov_ind]
             
-            dcd=pyro.param("discov_constitutive_de", self.dcd_prior.to(s.device))
+            dcd_intercept = pyro.param(
+                "discov_constitutive_intercept",
+                s.new_zeros(self.num_var),
+            )
+            discov_da = self.discov_da.model_sample(s, scale=fest([discov], -1))
             level_edges=self.tree_edges.model_sample(s,approx=self.approx)
             quality_genes=self.qg.model_sample(s) if self.use_q_score else 0.
             
@@ -305,7 +325,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
 
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
-            cur_dcd = oh_index(dcd, discov) if self.design_matrix else  dcd[discov_ind]
+            cur_dcd = (oh_index(discov_da, discov) + dcd_intercept) if self.design_matrix else (discov_da[discov_ind] + dcd_intercept)
             cur_seccov_dm=oh_index1(seccov_dm,seccov)
                  
             z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_seccov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
@@ -398,6 +418,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             seccov_dm=self.sm.guide_sample(s,scale=fest([seccov.abs()+1e-10,taxon_probs],-1))
             batch_dm=self.bm.guide_sample(s,scale=fest([batch,taxon_probs],-1))
             discov_di=self.di.guide_sample(s,scale=fest([discov,taxon_probs],-1))
+            _ = self.discov_da.guide_sample(s,scale=fest([discov],-1))
             cluster_intercept=self.ci.guide_sample(s,scale=fest([taxon_probs],-1))
             bei=self.bei.guide_sample(s,scale=fest([batch_embed.abs(),taxon_probs[...,:self.bi_depth]],-1))#maybe should be abs sum bei
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]

@@ -46,9 +46,10 @@ class MMB():
 class MAPLaplaceModule(MMB):
     '''
     MAP module for a maximum a posteriori estimate given a laplacian prior. 
-    Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right)
+    Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right).
+    prior_loc, if provided, sets the Laplace mean; otherwise zeros are used.
     '''
-    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.):
+    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.,prior_loc=None):
         super().__init__(model)
         self.param_name=name
         self.param_shape=param_shape
@@ -58,12 +59,18 @@ class MAPLaplaceModule(MMB):
         self.init_val=init_val
         self.param_only=param_only
         self.scale_multiplier=scale_multiplier
+        self.prior_loc=prior_loc
 
     def model_sample(self,s=torch.ones(1),scale=[]):
         if self.param_only:
             return self.make_params(s)
         with existing_plate_stack(scale+self.plate_list):
-            return pyro.sample(self.param_name+'_sample',dist.Laplace(s.new_zeros(self.param_shape),
+            prior_loc = self.prior_loc
+            if prior_loc is None:
+                prior_loc = s.new_zeros(self.param_shape)
+            else:
+                prior_loc = prior_loc.to(s.device)
+            return pyro.sample(self.param_name+'_sample',dist.Laplace(prior_loc,
                             self.scale_multiplier*self.model.prior_scale*s.new_ones(self.param_shape),validate_args=True).to_event(self.dependent_dim))
     
     def make_params(self,s=torch.ones(1)):
@@ -85,7 +92,7 @@ class MAPHalfCauchyModule(MMB):
     MAP module for a maximum a posteriori estimate given a half cauchy prior. 
     Takes a list of plates or a list of nullcontext, where nullcontext represents a dependent dimension (from the right)
     '''
-    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.):
+    def __init__(self,model,name,param_shape,plate_list=[],constraint=None,init_val=None,param_only=False,scale_multiplier=1.,prior_loc=None):
         super().__init__(model)
         self.param_name=name
         self.param_shape=param_shape
