@@ -57,6 +57,74 @@ def plot_grad_norms(antipode_model):
     plt.title("Gradient norms during SVI");
     plt.show()
 
+def _get_discov_labels(antipode_model):
+    adata = antipode_model.adata_manager.adata
+    if getattr(antipode_model, "discov_loc", "obs") == "obsm":
+        labels = adata.uns.get(f"{antipode_model.discov_key}_labels")
+        if labels is None:
+            labels = adata.uns.get("phylo_nodes")
+            if labels is not None and len(labels) != adata.obsm[antipode_model.discov_key].shape[1]:
+                labels = None
+        if labels is None:
+            labels = [str(i) for i in range(adata.obsm[antipode_model.discov_key].shape[1])]
+        return list(labels)
+    return list(adata.obs[antipode_model.discov_key].astype("category").cat.categories)
+
+def plot_phylo_parameter_divergence(
+    antipode_model,
+    params=("discov_dm", "discov_di", "discov_dc", "discov_da"),
+    agg: Literal["mean_abs", "l2", "max_abs"] = "mean_abs",
+    center: bool = True,
+    cmap: str = "viridis",
+    figsize: Tuple[float, float] = (6.5, 8.0),
+    save: bool = False,
+    filename: str | None = None,
+):
+    """
+    Heatmap of per-node divergence strength for each discovery parameter.
+    """
+    adata = antipode_model.adata_manager.adata
+    pstore = adata.uns.get("param_store", {})
+    labels = _get_discov_labels(antipode_model)
+
+    scores = {}
+    for name in params:
+        arr = pstore.get(name)
+        if arr is None and name == "discov_da":
+            arr = pstore.get("discov_constitutive_de")
+        if arr is None:
+            continue
+        if torch.is_tensor(arr):
+            arr = arr.detach().cpu().numpy()
+        arr = np.asarray(arr)
+        if center:
+            arr = arr - arr.mean(axis=0, keepdims=True)
+        reduce_axes = tuple(range(1, arr.ndim))
+        if agg == "l2":
+            score = np.sqrt(np.mean(arr ** 2, axis=reduce_axes))
+        elif agg == "max_abs":
+            score = np.max(np.abs(arr), axis=reduce_axes)
+        else:
+            score = np.mean(np.abs(arr), axis=reduce_axes)
+        scores[name] = score
+
+    if not scores:
+        raise ValueError("No matching parameters found in param_store for plotting.")
+
+    df = pd.DataFrame(scores, index=labels)
+    plt.figure(figsize=figsize)
+    seaborn.heatmap(df, cmap=cmap)
+    plt.ylabel("phylo node")
+    plt.xlabel("parameter")
+    plt.title("Divergence strength by phylo node")
+
+    if save:
+        if filename is None:
+            filename = os.path.join(sc.settings.figdir, "phylo_parameter_divergence.svg")
+        plt.savefig(filename, format="svg")
+    plt.show()
+    return df
+
 def clip_latent_dimensions(matrix, x):
     """
     Clips each latent dimension of the matrix at the 0+x and 100-x percentile.

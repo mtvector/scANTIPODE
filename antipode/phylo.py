@@ -334,6 +334,7 @@ def setup_phylo_covariates(
         eps=eps,
     )
     adata.obsm[obsm_key] = x_phylo
+    adata.uns[f"{obsm_key}_labels"] = nodes_f
 
     discov_da_init = build_discov_da_prior_with_internal_means(
         leaf_prior=leaf_prior,

@@ -47,19 +47,98 @@ class AntipodeTrainingMixin:
         self.adata_manager.adata.uns[prefix+'param_store']=pstore
 
     def get_antipode_outputs(self,batch_size=2048,device='cuda'):
-        if 'discov_onehot' not in self.adata_manager.adata.obsm.keys():
-            self.adata_manager.adata.obs[self.discov_key]=self.adata_manager.adata.obs[self.discov_key].astype('category')
-            self.adata_manager.adata.obsm['discov_onehot']=numpy_onehot(self.adata_manager.adata.obs[self.discov_key].cat.codes)
-        self.adata_manager.register_new_fields([scvi.data.fields.ObsmField('discov_onehot','discov_onehot')])
+        if self.discov_key in self.adata_manager.adata.obsm.keys():
+            onehot_key = self.discov_key
+        else:
+            self.adata_manager.adata.obs[self.discov_key] = (
+                self.adata_manager.adata.obs[self.discov_key].astype('category')
+            )
+            onehot_key = 'discov_onehot'
+            self.adata_manager.adata.obsm[onehot_key] = numpy_onehot(
+                self.adata_manager.adata.obs[self.discov_key].cat.codes
+            )
+        self.adata_manager.register_new_fields([scvi.data.fields.ObsmField(onehot_key, onehot_key)])
     
-        field_types={"s":np.float32,"discov_onehot":np.float32}
-        dataloader=scvi.dataloaders.AnnDataLoader(self.adata_manager,batch_size=32,drop_last=False,shuffle=False,data_and_attributes=field_types)#supervised_field_types for supervised step 
+        field_types={"s":np.float32,onehot_key:np.float32}
+        dataloader=scvi.dataloaders.AnnDataLoader(
+            self.adata_manager,
+            batch_size=32,
+            drop_last=False,
+            shuffle=False,
+            data_and_attributes=field_types,
+        )#supervised_field_types for supervised step 
         encoder_outs=batch_output_from_dataloader(dataloader,self.zl_encoder,batch_size=batch_size,device=device)
         encoder_outs[0]=self.z_transform(encoder_outs[0])
         encoder_out=[x.detach().cpu().numpy() for x in encoder_outs]
         classifier_outs=batch_torch_outputs([(encoder_outs[0])],self.classifier,batch_size=batch_size,device='cuda')
         classifier_out=[x.detach().cpu().numpy() for x in classifier_outs]
         return encoder_out,classifier_out
+
+    def _get_discov_labels(self):
+        adata = self.adata_manager.adata
+        if self.discov_loc == "obsm":
+            labels = adata.uns.get(f"{self.discov_key}_labels")
+            if labels is None:
+                labels = adata.uns.get("phylo_nodes")
+                if labels is not None and len(labels) != adata.obsm[self.discov_key].shape[1]:
+                    labels = None
+            if labels is None:
+                labels = [str(i) for i in range(adata.obsm[self.discov_key].shape[1])]
+            return list(labels)
+        return list(adata.obs[self.discov_key].astype("category").cat.categories)
+
+    def _get_discov_matrix(self, idx=None):
+        adata = self.adata_manager.adata
+        if self.discov_loc == "obsm":
+            discov = adata.obsm[self.discov_key]
+            if not isinstance(discov, np.ndarray):
+                discov = discov.toarray()
+        else:
+            discov = numpy_onehot(
+                adata.obs[self.discov_key].astype("category").cat.codes.to_numpy()
+            )
+        if idx is not None:
+            discov = discov[idx]
+        return discov
+
+    def _weighted_discov_leaf_aggregate(
+        self,
+        leaf_level_col,
+        layer=None,
+        normalize=False,
+        batch_size=1000,
+    ):
+        adata = self.adata_manager.adata
+        discov = self._get_discov_matrix()
+        leaf_series = adata.obs[leaf_level_col].astype("category")
+        leaf_cats = leaf_series.cat.categories
+        leaf_codes = leaf_series.cat.codes.to_numpy()
+        num_leaf = len(leaf_cats)
+        num_discov = discov.shape[1]
+        num_var = adata.shape[1] if layer is None else adata.layers[layer].shape[1]
+
+        sum_w = np.zeros((num_discov, num_leaf), dtype=np.float64)
+        sum_x = np.zeros((num_discov, num_leaf, num_var), dtype=np.float64)
+
+        for start in range(0, adata.n_obs, batch_size):
+            end = min(start + batch_size, adata.n_obs)
+            batch_idx = np.arange(start, end)
+            if layer is None:
+                data = adata[batch_idx].X
+            else:
+                data = adata[batch_idx].layers[layer]
+            dense = data if isinstance(data, np.ndarray) else data.toarray()
+            if normalize:
+                dense = dense / (1.0 + dense.sum(-1, keepdims=True))
+            discov_batch = discov[batch_idx]
+            leaf_batch = leaf_codes[batch_idx]
+            leaf_onehot = np.eye(num_leaf, dtype=np.float64)[leaf_batch]
+            sum_w += np.einsum("bd,bl->dl", discov_batch, leaf_onehot)
+            sum_x += np.einsum("bd,bl,bg->dlg", discov_batch, leaf_onehot, dense)
+
+        means = sum_x / np.maximum(sum_w[..., None], 1e-12)
+        orders = {self.discov_key: self._get_discov_labels(), leaf_level_col: list(leaf_cats)}
+        return means, orders, sum_w
 
     def store_outputs(self,device='cuda',prefix=''):
         self.save_params_to_uns(prefix='')
@@ -405,7 +484,7 @@ class AntipodeTrainingMixin:
             levels=self.tree_convergence_bottom_up.just_propagate(torch.eye(self.level_sizes[-1],device=pstore['locs'].device),level_edges)
             prop_taxon=torch.tensor(torch.cat(levels,dim=-1),device=pstore['locs'].device).float()
             
-            discov_labels=adata.obs[self.discov_key].cat.categories
+            discov_labels = self._get_discov_labels()
             latent_labels=[str(x) for x in range(pstore['discov_dc'].shape[1])]
             adata.obs[leaf_level]=adata.obs[leaf_level].astype('category')
             cluster_index=adata.obs[leaf_level].cat.categories.astype(int)#list(range(antipode_model.level_sizes[-1]))#list(range(pstore['locs'].shape[0]))
@@ -427,7 +506,14 @@ class AntipodeTrainingMixin:
             prop_discov_di = torch.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
             prop_discov_dm = torch.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
             discov_cluster_params=(torch.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+discov_da.unsqueeze(1)+discov_constitutive_intercept.unsqueeze(0).unsqueeze(1)))-pstore['softmax_shift']
-            return torch.tensor(discov_cluster_params),torch.tensor(cluster_params), cluster_labels,var_labels,(torch.tensor(prop_taxon), torch.tensor(prop_locs),torch.tensor(prop_discov_di),torch.tensor(prop_discov_dm))
+            return (
+                torch.tensor(discov_cluster_params),
+                torch.tensor(cluster_params),
+                cluster_labels,
+                var_labels,
+                torch.tensor(discov_da),
+                (torch.tensor(prop_taxon), torch.tensor(prop_locs), torch.tensor(prop_discov_di), torch.tensor(prop_discov_dm)),
+            )
         else:
             pstore=adata.uns[prefix+'param_store']
             n_clusters=self.level_sizes[-1]
@@ -435,7 +521,7 @@ class AntipodeTrainingMixin:
             levels=self.tree_convergence_bottom_up.just_propagate(np.eye(self.level_sizes[-1]),level_edges)
             prop_taxon=np.concatenate(levels,axis=-1)
             
-            discov_labels=adata.obs[self.discov_key].cat.categories
+            discov_labels = self._get_discov_labels()
             latent_labels=[str(x) for x in range(pstore['discov_dc'].shape[1])]
             adata.obs[leaf_level]=adata.obs[leaf_level].astype('category')
             cluster_index=adata.obs[leaf_level].cat.categories.astype(int)#list(range(antipode_model.level_sizes[-1]))#list(range(pstore['locs'].shape[0]))
@@ -457,8 +543,28 @@ class AntipodeTrainingMixin:
             prop_discov_di = np.einsum('pc,dcg->dpg',prop_taxon,pstore['discov_di'])
             prop_discov_dm = np.einsum('pc,dcm->dpm',prop_taxon,pstore['discov_dm'])
             discov_cluster_params=(np.einsum('dpm,dmg->dpg',prop_locs+prop_discov_dm,pstore['z_decoder_weight']+pstore['discov_dc'])+(prop_cluster_intercept+prop_discov_di+np.expand_dims(discov_da,1)+discov_constitutive_intercept[np.newaxis,np.newaxis,:]))-pstore['softmax_shift']
-            zero_mask = (adata.obs.groupby(self.discov_key)[leaf_level].value_counts().unstack().loc[:,cluster_labels]>=cluster_count_threshold).to_numpy()
-            return discov_cluster_params,cluster_params, cluster_labels,var_labels, 1/zero_mask[...,np.newaxis],(prop_taxon, prop_locs,prop_discov_di,prop_discov_dm)
+            if self.discov_loc == "obsm":
+                discov = self._get_discov_matrix()
+                leaf_codes = adata.obs[leaf_level].cat.codes.to_numpy()
+                leaf_onehot = np.eye(len(cluster_labels), dtype=np.float64)[leaf_codes]
+                counts = np.einsum("bd,bl->dl", discov, leaf_onehot)
+                zero_mask = counts >= cluster_count_threshold
+            else:
+                zero_mask = (
+                    adata.obs.groupby(self.discov_key)[leaf_level]
+                    .value_counts()
+                    .unstack()
+                    .loc[:, cluster_labels] >= cluster_count_threshold
+                ).to_numpy()
+            return (
+                discov_cluster_params,
+                cluster_params,
+                cluster_labels,
+                var_labels,
+                discov_da,
+                1 / zero_mask[..., np.newaxis],
+                (prop_taxon, prop_locs, prop_discov_di, prop_discov_dm),
+            )
         
     def get_posterior_cluster_means(self, batch_size=128, device='cpu'):
         """
@@ -496,7 +602,7 @@ class AntipodeTrainingMixin:
         )
     
         # category info
-        discov_cats = adata.obs[self.discov_key].cat.categories
+        discov_cats = self._get_discov_labels()
         leaf_cats   = adata.obs[leaf_level_col].cat.categories.astype(int)
         num_discov  = len(discov_cats)
         num_leaf    = len(leaf_cats)
@@ -505,6 +611,10 @@ class AntipodeTrainingMixin:
         first_batch = True
         cell_counter = 0
     
+        discov_matrix = None
+        if self.discov_loc == "obsm":
+            discov_matrix = self._get_discov_matrix()
+
         with torch.no_grad():
             for batch in tqdm.tqdm(loader):
                 # move to device
@@ -532,13 +642,19 @@ class AntipodeTrainingMixin:
                     cell_counter += bsz
     
                 # map to cluster codes
-                d_codes = adata.obs[self.discov_key].cat.codes[idx].values
                 l_codes = adata.obs[leaf_level_col].cat.codes[idx].values
-    
-                # accumulate
-                for i, (dc, lc) in enumerate(zip(d_codes, l_codes)):
-                    sum_post[dc, lc] += rates[i]
-                    count_post[dc, lc] += 1
+
+                if self.discov_loc == "obsm":
+                    discov_batch = discov_matrix[idx]
+                    leaf_onehot = np.eye(num_leaf, dtype=np.float64)[l_codes]
+                    sum_post += np.einsum("bd,bl,bg->dlg", discov_batch, leaf_onehot, rates)
+                    count_post += np.einsum("bd,bl->dl", discov_batch, leaf_onehot)
+                else:
+                    d_codes = adata.obs[self.discov_key].cat.codes[idx].values
+                    # accumulate
+                    for i, (dc, lc) in enumerate(zip(d_codes, l_codes)):
+                        sum_post[dc, lc] += rates[i]
+                        count_post[dc, lc] += 1
     
         # avoid divide‐by‐zero
         denom = np.maximum(count_post[..., None], 1)
@@ -577,14 +693,21 @@ class AntipodeTrainingMixin:
             device=device,
         )
     
-        actual_means, actual_orders = group_aggr_anndata(
-            adata,
-            [self.discov_key, leaf_level_col],
-            layer=self.layer,
-            normalize=True,
-        )
+        if self.discov_loc == "obsm":
+            actual_means, actual_orders, _ = self._weighted_discov_leaf_aggregate(
+                leaf_level_col,
+                layer=self.layer,
+                normalize=True,
+            )
+        else:
+            actual_means, actual_orders = group_aggr_anndata(
+                adata,
+                [self.discov_key, leaf_level_col],
+                layer=self.layer,
+                normalize=True,
+            )
     
-        discov_cluster_params, cluster_params, cluster_labels, var_labels, (
+        discov_cluster_params, cluster_params, cluster_labels, var_labels, discov_da, (
             prop_taxon, prop_locs, prop_discov_di, prop_discov_dm
         ) = self.calculate_cluster_params(flavor='torch')
         # select only the leaves
@@ -821,7 +944,7 @@ class AntipodeTrainingMixin:
         self.eval()
     
         # pull out category arrays for later
-        discov_cats = adata.obs[self.discov_key].cat.categories
+        discov_cats = self._get_discov_labels()
         leaf_cats   = adata.obs[leaf_level_col].cat.categories
     
         # ————————————————————————————————————————————
@@ -833,12 +956,19 @@ class AntipodeTrainingMixin:
     
         # ————————————————————————————————————————————
         # 4) Compute actual cluster means & orders
-        actual_aggr = group_aggr_anndata(
-            adata,
-            [self.discov_key, leaf_level_col],
-            layer=self.layer,
-            normalize=True,
-        )
+        if self.discov_loc == "obsm":
+            actual_aggr = self._weighted_discov_leaf_aggregate(
+                leaf_level_col,
+                layer=self.layer,
+                normalize=True,
+            )
+        else:
+            actual_aggr = group_aggr_anndata(
+                adata,
+                [self.discov_key, leaf_level_col],
+                layer=self.layer,
+                normalize=True,
+            )
         sum_aggr = group_aggr_anndata(
             adata,
             [leaf_level_col],
@@ -1298,4 +1428,3 @@ class Print_Trace_ELBO(ELBO):
                 surrogate_loss_particle.backward(retain_graph=self.retain_graph)
         warn_if_nan(loss, "loss")
         return loss
-

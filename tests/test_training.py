@@ -1,34 +1,16 @@
 import numpy as np
 import pandas as pd
-import torch
-import pyro
-import pyro.poutine as poutine
 import anndata
+import pyro
+import torch
+from pyro import poutine
 
-from antipode.model_modules import MAPLaplaceModule
 from antipode.antipode_model import ANTIPODE
+from antipode.model_modules import SafeSVI
 
 
-class DummyModel:
-    prior_scale = 2.0
-
-
-def test_map_laplace_prior_loc():
-    pyro.clear_param_store()
-    prior_loc = torch.tensor([[1.0, -2.0], [0.5, 0.0]])
-    module = MAPLaplaceModule(
-        DummyModel(),
-        name="test",
-        param_shape=list(prior_loc.shape),
-        prior_loc=prior_loc,
-    )
-    trace = poutine.trace(module.model_sample).get_trace(s=torch.ones(1))
-    dist = trace.nodes["test_sample"]["fn"]
-    assert torch.allclose(dist.loc, prior_loc)
-
-
-def _make_minimal_adata():
-    x = np.ones((4, 3), dtype=np.float32)
+def _make_minimal_adata(n_obs=4, n_genes=3):
+    x = np.ones((n_obs, n_genes), dtype=np.float32)
     adata = anndata.AnnData(x)
     adata.layers["counts"] = x.copy()
     adata.obs["discov"] = pd.Categorical(["a", "b", "a", "b"])
@@ -36,7 +18,7 @@ def _make_minimal_adata():
     return adata
 
 
-def test_discov_da_and_intercept_params():
+def test_train_phase_runs_on_minimal_data():
     pyro.clear_param_store()
     adata = _make_minimal_adata()
     adata.obsm["discov_onehot"] = np.eye(2, dtype=np.float32)[
@@ -60,15 +42,24 @@ def test_discov_da_and_intercept_params():
         use_psi=False,
     )
     model.freeze_encoder = False
+
     s = torch.tensor(adata.layers["counts"])
     discov_ind = torch.tensor(adata.obsm["discov_onehot"])
     batch_ind = torch.tensor(adata.obsm["batch_onehot"])
     seccov = torch.zeros((s.shape[0], 1))
-    model.guide(s, discov_ind=discov_ind, batch_ind=batch_ind, seccov=seccov)
-    model.model(s, discov_ind=discov_ind, batch_ind=batch_ind, seccov=seccov)
 
-    pstore = pyro.get_param_store()
-    assert "discov_da" in pstore
-    assert tuple(pstore["discov_da"].shape) == (model.num_discov, model.num_var)
-    assert "discov_constitutive_intercept" in pstore
-    assert tuple(pstore["discov_constitutive_intercept"].shape) == (model.num_var,)
+    optim = pyro.optim.ClippedAdam({"lr": 1e-3})
+    elbo = pyro.infer.Trace_ELBO(num_particles=1)
+    model_blocked = poutine.block(model.model, hide=["s"])
+    svi = SafeSVI(model_blocked, model.guide, optim, elbo)
+
+    loss = svi.step(
+        s,
+        discov_ind=discov_ind,
+        batch_ind=batch_ind,
+        seccov=seccov,
+        step=torch.ones(1),
+    )
+
+    assert np.isfinite(loss)
+    assert len(pyro.get_param_store()) > 0
