@@ -239,6 +239,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             discov=index_to_onehot(discov_ind,[s.shape[0],self.num_discov]).to(s.device)
             batch_ind=batch_ind.squeeze()
             discov_ind=discov_ind.squeeze()
+            if batch_ind.ndim > 1:
+                batch_ind = batch_ind.argmax(-1)
+            if discov_ind.ndim > 1:
+                discov_ind = discov_ind.argmax(-1)
         else:
             batch=batch_ind
             discov=discov_ind
@@ -363,6 +367,10 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             discov=index_to_onehot(discov_ind,[s.shape[0],self.num_discov]).to(s.device)
             batch_ind=batch_ind.squeeze()
             discov_ind=discov_ind.squeeze()
+            if batch_ind.ndim > 1:
+                batch_ind = batch_ind.argmax(-1)
+            if discov_ind.ndim > 1:
+                discov_ind = discov_ind.argmax(-1)
         else:
             batch=batch_ind
             discov=discov_ind
