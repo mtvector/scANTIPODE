@@ -157,7 +157,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                                   init_val=((2/self.num_latent)*(torch.rand(self.num_latent,self.num_var)-0.5)),param_only=self.zdw_as_param)
         self.zl=MAPLaplaceModule(self,'locs',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=self.loc_as_param)
         self.zs=MAPHalfCauchyModule(self,'scales',[self.num_labels,self.num_latent],
-                                    [self.label_plate,self.latent_plate],scale_multiplier=self.scale_init_val*torch.ones(self.num_labels,self.num_latent),
+                                    [self.label_plate,self.latent_plate],scale_multiplier=self.scale_init_val,
                                     init_val=self.scale_init_val*torch.ones(self.num_labels,self.num_latent),
                                     constraint=constraints.positive,param_only=False)
         self.zld=MAPLaplaceModule(self,'locs_dynam',[self.num_labels,self.num_latent],[self.label_plate,self.latent_plate],param_only=False)
