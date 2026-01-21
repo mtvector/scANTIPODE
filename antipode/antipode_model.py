@@ -147,7 +147,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],
                                  [self.discov_plate,self.latent_plate2,self.var_plate],scale_multiplier=self.anc_prior_scalar)
         self.discov_da=MAPLaplaceModule(self,'discov_da',[self.num_discov,self.num_var],
-                                 [self.discov_plate,self.var_plate],init_val=self.discov_da_init,
+                                 [self.discov_plate,self.var_plate],init_val=self.discov_da_prior_loc,
                                  prior_loc=self.discov_da_prior_loc,scale_multiplier=self.anc_prior_scalar)
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],
                                   [self.latent_plate2,self.var_plate],
