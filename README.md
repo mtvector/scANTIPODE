@@ -1,9 +1,14 @@
-<h1 style="text-align: center;"> scANTIPODE</h1>
-<a href="https://en.wikipedia.org/wiki/Antipodes"> 
-<div align="center">
-  <img src="assets/antipode_logo_alternate.png" alt="antipode logo!" width="200">
-</div>
-</a>
+<h1 align="center">scANTIPODE</h1>
+
+<p align="center">
+  <a href="https://en.wikipedia.org/wiki/Antipodes">
+    <img
+      src="assets/antipode_logo_alternate.png"
+      alt="antipode logo"
+      width="320"
+    >
+  </a>
+</p>
 
 **S**ingle **C**ell **A**ncestral **N**ode **T**axonomy **I**nference by **P**artitioning **O**f **D**ifferential **E**xpression. The model is an extension of the SCVI paradigm--a structured generative, variational inference model developed for the simultaneous analysis (DE) and categorization (taxonomy generation) of cell types across evolution (or now any covariate) using single-cell RNA-seq data. Long ago it began as a hack of a simplified model of [scANVI](https://pyro.ai/examples/scanvi.html) and is built on the pytorch-based PPL [pyro](https://pyro.ai/). The model acts as an integration method, that learns interpretable differential expression in the process. Note that this means ANTIPODE will fail to integrate datasets of different datasets, or datasets with large disparities in quality or gene mean dispersions.
 
