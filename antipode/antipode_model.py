@@ -66,7 +66,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
     """
 
     def __init__(self, adata, discov_pair, batch_pair, layer, seccov_key='seccov_dummy', level_sizes=[1,10,100],
-                 num_latent=50, scale_factor=None, prior_scale=100, discov_da_init=None, discov_da_prior_M=20.0, discov_da_zero_eps=1e-8, sampler_category=None, theta_prior=10., dcd_prior=None,
+                 num_latent=50, scale_factor=None, prior_scale=100, discov_real_means=None, discov_da_prior_M=-20.0, discov_da_zero_eps=0., sampler_category=None, theta_prior=10., dcd_prior=None,
                  loc_as_param=True,zdw_as_param=True, intercept_as_param=False, seccov_as_param=True,use_q_score=False, use_psi=True, psi_levels=[True],
                  num_batch_embed=2,  min_theta=1e-1, scale_init_val=0.01, bi_depth=2, z_transform=None, dist_normalize=False,
                  classifier_hidden=[3000,3000,3000],encoder_hidden=[6000,5000,3000,1000],batch_embedder_hidden=[1000,500,500],anc_prior_scalar=torch.tensor(0.5)):
@@ -111,19 +111,16 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.psi_levels = [float(x) for x in psi_levels]
         self.min_theta = min_theta
         self.anc_prior_scalar = anc_prior_scalar
-        
-        if discov_da_init is None and dcd_prior is not None:
-            discov_da_init = dcd_prior
-        self.discov_da_init = torch.zeros((self.num_discov, self.num_var)) if discov_da_init is None else discov_da_init
         self.discov_da_prior_M = discov_da_prior_M
         self.discov_da_zero_eps = discov_da_zero_eps
-        # Prior mean mask: 0 where detected, -M where never detected.
+        
         self.discov_da_prior_loc = torch.where(
-            self.discov_da_init.abs() > self.discov_da_zero_eps,
-            torch.zeros_like(self.discov_da_init),
-            -self.discov_da_prior_M * torch.ones_like(self.discov_da_init),
+            discov_real_means > discov_da_zero_eps,
+            0.,
+            self.discov_da_prior_M,
         )
-                
+        self.intercept_init = (discov_real_means.mean(0,keepdim=True)+torch.finfo(torch.float32).tiny).log()
+
         # Initialize plates to be used during sampling
         self.var_plate = pyro.plate('var_plate',self.num_var,dim=-1)
         self.discov_plate = pyro.plate('discov_plate',self.num_discov,dim=-3)
@@ -265,8 +262,8 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
             cur_discov_mul = torch.einsum('do,bd->bo',discov_mul, discov_ind) if self.design_matrix else discov_mul[discov_ind]
             
             dcd_intercept = pyro.param(
-                "discov_constitutive_intercept",
-                s.new_zeros(self.num_var),
+                "constitutive_intercept",
+                self.intercept_init.to(s.device),
             )
             discov_da = self.discov_da.model_sample(s, scale=fest([discov], -1))
             level_edges=self.tree_edges.model_sample(s,approx=self.approx)
