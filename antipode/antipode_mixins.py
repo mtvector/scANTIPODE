@@ -350,7 +350,7 @@ class AntipodeTrainingMixin:
     
     def run_standard_protocol(self, out_path, max_steps=500000, num_particles=3,
                               device='cuda', max_learning_rate=1e-3, one_cycle_lr=True, 
-                              batch_size=32, correction_steps=None):
+                              batch_size=32, correction_steps=None, save_anndata=False):
         if isinstance(max_steps, int):
             max_steps = [max_steps] * 3  # Now each phase uses the same value.
         elif isinstance(max_steps, list) and len(max_steps) == 3:
@@ -428,7 +428,7 @@ class AntipodeTrainingMixin:
             plot_loss(self.losses)
             self.store_outputs(device=device, prefix='')
             self.clear_cuda()
-            self.save(out_path, save_anndata=True, prefix='p3_')
+            self.save(out_path, save_anndata=save_anndata, prefix='p3_')
             self.to(device)
         self.to(device)
         self.eval()
