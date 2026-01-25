@@ -168,8 +168,15 @@ class AntipodeTrainingMixin:
         self.train()
         
         model = self.classifier.to(device)
-        input_tensor =  torch.tensor(self.adata_manager.adata.obsm[self.dimension_reduction])  # Your input features tensor, shape [n_samples, n_features]
-        target_tensor = torch.tensor(self.adata_manager.adata.obsm[cluster+'_onehot'])  # Your target labels tensor, shape [n_samples]    
+        input_tensor = torch.tensor(
+            self.adata_manager.adata.obsm[self.dimension_reduction],
+            dtype=torch.float32,
+        )
+        target_tensor = torch.tensor(
+            self.adata_manager.adata.obs[cluster].astype("category").cat.codes.to_numpy(),
+            dtype=torch.long,
+        )
+        num_classes = len(self.adata_manager.adata.obs[cluster].astype("category").cat.categories)
         
         # Step 1: Prepare to train
         dataset = torch.utils.data.TensorDataset(input_tensor, target_tensor)
@@ -185,7 +192,10 @@ class AntipodeTrainingMixin:
                     continue
                 # Forward pass
                 outputs = model(inputs.to(device))
-                loss = criterion(softmax(outputs[0],-1)[:,-targets.shape[-1]:], targets.to(device))
+                logits = outputs[0] if isinstance(outputs, (list, tuple)) else outputs
+                if logits.shape[-1] > num_classes:
+                    logits = logits[..., -num_classes:]
+                loss = criterion(logits, targets.to(device))
         
                 # Backward pass and optimize
                 optimizer.zero_grad()
@@ -350,7 +360,8 @@ class AntipodeTrainingMixin:
     
     def run_standard_protocol(self, out_path, max_steps=500000, num_particles=3,
                               device='cuda', max_learning_rate=1e-3, one_cycle_lr=True, 
-                              batch_size=32, correction_steps=None, save_anndata=False):
+                              batch_size=32, correction_steps=None, save_anndata=False,
+                              phase2_pretrain_epochs=2):
         if isinstance(max_steps, int):
             max_steps = [max_steps] * 3  # Now each phase uses the same value.
         elif isinstance(max_steps, list) and len(max_steps) == 3:
@@ -409,7 +420,7 @@ class AntipodeTrainingMixin:
             # Phase 2
             print('Running phase 2')
             self.store_outputs(device=device, prefix='')
-            self.prepare_phase_2(epochs=2, device=device, dimension_reduction='X_antipode')
+            self.prepare_phase_2(epochs=phase2_pretrain_epochs, device=device, dimension_reduction='X_antipode')
             self.train_phase(phase=2, max_steps=max_steps[1], print_every=10000, num_particles=num_particles,
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, freeze_encoder=True, clip_std=100.)
