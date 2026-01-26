@@ -402,7 +402,7 @@ class AntipodeTrainingMixin:
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, clip_std=100.)
             plot_loss(self.losses)
-            self.store_outputs(device=device, prefix='')
+            #self.store_outputs(device=device, prefix='')
             self.clear_cuda()
             self.save(out_path, save_anndata=False, prefix='p1_')
         if last_completed_phase < 2:
@@ -414,14 +414,14 @@ class AntipodeTrainingMixin:
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, freeze_encoder=True, clip_std=100.)
             plot_loss(self.losses)
-            self.store_outputs(device=device, prefix='')
+            #self.store_outputs(device=device, prefix='')
             self.clear_cuda()
             self.save(out_path, save_anndata=False, prefix='p2_')
         
         if last_completed_phase < 3:
             # Phase 3
             print('Running phase 3')
-            self.store_outputs(device=device, prefix='')
+            #self.store_outputs(device=device, prefix='')
             self.train_phase(phase=3, max_steps=max_steps[2], print_every=10000, num_particles=num_particles,
                              device=device, max_learning_rate=max_learning_rate, one_cycle_lr=one_cycle_lr,
                              batch_size=batch_size, clip_std=100)
