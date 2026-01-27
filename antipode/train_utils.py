@@ -44,26 +44,30 @@ def batch_torch_outputs(inputs,function,batch_size=2048,device='cuda'):
         device (string): ('cuda','cpu',...)
     '''
     num_obs=inputs[0].shape[0]
-    out_list=[[]]
+    out_tensors=None
     function.to(device)
+    function.eval()
     with torch.no_grad():
         for i in tqdm.tqdm(range(int(num_obs/batch_size)+1)):
+            start_ind=i*batch_size
             end_ind=min(((i+1)*batch_size),num_obs)
-            if (i*batch_size) == end_ind:
+            if start_ind == end_ind:
                 continue
-            outs=function(*[x[(i*batch_size):end_ind].to(device) for x in inputs])
-            num_outs=len(outs)
-            if num_outs==1 or type(outs) is not list:
-                num_outs=1
-                out_list[0].append(outs.to('cpu'))
-            else:
-                for j in range(num_outs):
-                    if j==len(out_list):
-                        out_list.append([outs[j].to('cpu')])
-                    else:
-                        out_list[j].append(outs[j].to('cpu'))
-        final_outs=[torch.cat(out_list[i],dim=0) for i in range(num_outs)]
-        return(final_outs)    
+            outs=function(*[x[start_ind:end_ind].to(device) for x in inputs])
+            if not isinstance(outs,(list,tuple)):
+                outs=[outs]
+            if out_tensors is None:
+                out_tensors=[
+                    torch.empty(
+                        (num_obs,)+tuple(o.shape[1:]),
+                        dtype=o.dtype,
+                        device='cpu',
+                    )
+                    for o in outs
+                ]
+            for j,o in enumerate(outs):
+                out_tensors[j][start_ind:end_ind]=o.detach().to('cpu')
+        return(out_tensors)    
 
 #Make full dataloader first
 def batch_output_from_dataloader(dataloader,function,batch_size=2048,device='cuda'):
@@ -76,26 +80,50 @@ def batch_output_from_dataloader(dataloader,function,batch_size=2048,device='cud
         batch_size (integer): number along 0 dim per batch
         device (string): ('cuda','cpu',...)
     '''
-    out_list=[[]]
+    out_tensors=None
+    out_list=None
+    num_obs=None
+    if hasattr(dataloader,"adata_manager"):
+        num_obs=dataloader.adata_manager.adata.n_obs
+    elif hasattr(dataloader,"dataset"):
+        try:
+            num_obs=len(dataloader.dataset)
+        except Exception:
+            num_obs=None
     function.to(device)
     function.eval()
     with torch.no_grad():
+        start_ind=0
         for x in tqdm.tqdm(dataloader):
             x=[x[k].to(device) for k in x.keys()]
             outs=function(*x)
-            num_outs=len(outs)
-            if num_outs==1 or type(outs) is not list:
-                num_outs=1
-                out_list[0].append(outs.to('cpu'))
-            else:
-                for j in range(num_outs):
-                    if j==len(out_list):
-                        out_list.append([outs[j].to('cpu')])
-                    else:
-                        out_list[j].append(outs[j].to('cpu'))
-
-        final_outs=[torch.cat(out_list[i],dim=0) for i in range(num_outs)]
-        return(final_outs)
+            if not isinstance(outs,(list,tuple)):
+                outs=[outs]
+            if num_obs is None:
+                if out_list is None:
+                    out_list=[[] for _ in range(len(outs))]
+                for j,o in enumerate(outs):
+                    out_list[j].append(o.detach().to('cpu'))
+                continue
+            if out_tensors is None:
+                out_tensors=[
+                    torch.empty(
+                        (num_obs,)+tuple(o.shape[1:]),
+                        dtype=o.dtype,
+                        device='cpu',
+                    )
+                    for o in outs
+                ]
+            end_ind=start_ind+outs[0].shape[0]
+            for j,o in enumerate(outs):
+                out_tensors[j][start_ind:end_ind]=o.detach().to('cpu')
+            start_ind=end_ind
+        if num_obs is None:
+            final_outs=[torch.cat(out_list[i],dim=0) for i in range(len(out_list))]
+            return(final_outs)
+        if start_ind != num_obs:
+            out_tensors=[t[:start_ind] for t in out_tensors]
+        return(out_tensors)
 
 def get_antipode_outputs(antipode_model,batch_size=2048,device='cuda'):
     design_matrix=False  #3x faster
@@ -271,4 +299,3 @@ def create_weighted_random_sampler(series):
 
 def mixture(x,y,psi):
     return((psi*x)+((1-psi)*y))
-

@@ -147,21 +147,44 @@ class AntipodeTrainingMixin:
         antipode_outs=self.get_antipode_outputs(batch_size=2048,device=device)
         # self.allDone()
         taxon=antipode_outs[1][0]
-        self.adata_manager.adata.obsm[prefix+'X_antipode']=antipode_outs[0][0]
+        self.adata_manager.adata.obsm[prefix+'X_antipode']=antipode_outs[0][0].astype(np.float32,copy=False)
         for i in range(antipode_outs[1][1].shape[1]):
-            self.adata_manager.adata.obs[prefix+'psi_'+str(i)]=numpy_centered_sigmoid(antipode_outs[1][1][...,i])
-        self.adata_manager.adata.obs[prefix+'q_score']=scipy.special.expit(antipode_outs[0][2])
-        level_edges=[numpy_hardmax(self.adata_manager.adata.uns[prefix+'param_store']['edges_'+str(i)],axis=-1) for i in range(len(self.level_sizes)-1)]
-        levels=self.tree_convergence_bottom_up.just_propagate(scipy.special.softmax(taxon[...,-self.level_sizes[-1]:],axis=-1),level_edges,s=torch.ones(1))
-        prop_taxon=np.concatenate(levels,axis=-1)
+            self.adata_manager.adata.obs[prefix+'psi_'+str(i)]=numpy_centered_sigmoid(antipode_outs[1][1][...,i]).astype(np.float32,copy=False)
+        self.adata_manager.adata.obs[prefix+'q_score']=scipy.special.expit(antipode_outs[0][2]).astype(np.float32,copy=False)
+        level_edges=[
+            numpy_hardmax(
+                self.adata_manager.adata.uns[prefix+'param_store']['edges_'+str(i)],
+                axis=-1,
+            ).astype(np.float32,copy=False)
+            for i in range(len(self.level_sizes)-1)
+        ]
+        leaf_probs=scipy.special.softmax(taxon[...,-self.level_sizes[-1]:],axis=-1).astype(np.float32,copy=False)
+        levels=self.tree_convergence_bottom_up.just_propagate(leaf_probs,level_edges,s=torch.ones(1))
+        prop_taxon=np.concatenate(levels,axis=-1).astype(np.float32,copy=False)
         self.adata_manager.adata.obsm[prefix+'taxon_probs']=prop_taxon
-        levels=self.tree_convergence_bottom_up.just_propagate(numpy_hardmax(levels[-1],axis=-1),level_edges,s=torch.ones(1))
-        for i in range(len(levels)):
+        leaf_idx=levels[-1].argmax(1)
+        del levels, leaf_probs, prop_taxon
+        # Propagate labels without materializing a full one-hot matrix
+        hard_levels=[]
+        cur=level_edges[-1][leaf_idx]
+        hard_levels.append(cur)
+        for edges in level_edges[-2::-1]:
+            cur=cur@edges
+            hard_levels.append(cur)
+        hard_levels=hard_levels[::-1]
+        for i in range(len(hard_levels)):
             cur_clust=prefix+'level_'+str(i)
-            self.adata_manager.adata.obs[cur_clust]=levels[i].argmax(1)
-            self.adata_manager.adata.obs[cur_clust]=self.adata_manager.adata.obs[cur_clust].astype(str)
-        self.adata_manager.adata.obs[prefix+'antipode_cluster'] = self.adata_manager.adata.obs.apply(lambda x: '_'.join([x[prefix+'level_'+str(i)] for i in range(len(levels))]), axis=1)
-        self.adata_manager.adata.obs[prefix+'antipode_cluster'] = self.adata_manager.adata.obs[prefix+'antipode_cluster'].astype(str)    
+            self.adata_manager.adata.obs[cur_clust]=hard_levels[i].argmax(1).astype(str)
+        leaf_level=prefix+'level_'+str(len(hard_levels))
+        self.adata_manager.adata.obs[leaf_level]=leaf_idx.astype(str)
+        level_cols=[prefix+'level_'+str(i) for i in range(len(hard_levels)+1)]
+        level_vals=self.adata_manager.adata.obs[level_cols].astype(str).to_numpy()
+        clusters=level_vals[:,0]
+        for j in range(1,level_vals.shape[1]):
+            clusters=np.char.add(np.char.add(clusters,'_'),level_vals[:,j])
+        self.adata_manager.adata.obs[prefix+'antipode_cluster']=clusters.astype(str)
+        del antipode_outs, taxon, level_edges, hard_levels, leaf_idx, level_vals, clusters
+        gc.collect()
     
     def pretrain_classifier(self,epochs = 5,learning_rate = 0.001,batch_size = 64,prefix='',cluster='kmeans',device='cuda'):
         '''basic pytorch training of feed forward classifier to ease step 2'''        
