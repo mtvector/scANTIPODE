@@ -455,13 +455,14 @@ class AntipodeTrainingMixin:
             self.to(device)
         self.to(device)
         self.eval()
-        self.store_outputs(device=device, prefix='')#Cheap and just for safety
         # Final correction (always run after phase 3)
         print('Running final correction')
         try:
-            if correction_steps is not None:
+            if (correction_steps is not None) and (correction_steps>0):
+                self.store_outputs(device=device, prefix='')#Cheap and just for safety
                 posterior_out, posterior_categories = self.correct_fits(batch_size=128, n_steps=correction_steps,num_particles=num_particles)
-            else:
+            elif (correction_steps is not None) and (correction_steps==0):
+                self.store_outputs(device=device, prefix='')#Cheap and just for safety
                 posterior_out, posterior_categories = self.correct_fits_intercepts(batch_size=128)
                 
             self.store_outputs(device=device, prefix='')
