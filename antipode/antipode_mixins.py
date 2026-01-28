@@ -288,7 +288,7 @@ class AntipodeTrainingMixin:
     
     def common_training_loop(self, dataloader, max_steps, scheduler, svi, print_every, device, steps=0):
         self.losses = []
-        pbar = tqdm.tqdm(total=max_steps, position=0)
+        pbar = tqdm.tqdm(total=max_steps, position=0,mininterval=30.)
         while steps < max_steps:
             for x in dataloader:
                 x['step'] = torch.ones(1).to(device) * steps
@@ -640,7 +640,7 @@ class AntipodeTrainingMixin:
             discov_matrix = self._get_discov_matrix()
 
         with torch.no_grad():
-            for batch in tqdm.tqdm(loader):
+            for batch in tqdm.tqdm(loader,mininterval=30.):
                 # move to device
                 x = {k: v.to(device) for k, v in batch.items()}
                 # trace guide→model
