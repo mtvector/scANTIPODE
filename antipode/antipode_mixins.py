@@ -412,7 +412,8 @@ class AntipodeTrainingMixin:
             adata = self.adata_manager.adata
         # If a checkpoint exists, load the corresponding model with the chosen adata.
         if last_completed_phase:
-            self.load(out_path, prefix=f'p{last_completed_phase}_', adata=adata, device=device)
+            # Rebind to the loaded model so shapes/level_sizes align with the checkpoint's param store.
+            self = self.load(out_path, prefix=f'p{last_completed_phase}_', adata=adata, device=device)
             print(f"Resuming from phase {last_completed_phase}")
         else:
             print("No checkpoints found. Starting training from scratch.")
