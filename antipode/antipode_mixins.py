@@ -226,14 +226,34 @@ class AntipodeTrainingMixin:
         '''Run this if not running in supervised only mode (JUST phase2 with provided obsm clustering), 
         runs kmeans if cluster=kmeans, else uses the obs column provided by cluster. epochs=None skips pretraing of classifier
         To learn a latent space from scratch set dimension_reduction to None and use freeze_encoder=False'''
+        target_leaf_count = int(self.level_sizes[-1])
         if cluster=='kmeans':
-            kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=self.level_sizes[-1],init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm[dimension_reduction])
-            self.adata_manager.adata.obs['kmeans']=kmeans.labels_
-            self.adata_manager.adata.obs['kmeans']=self.adata_manager.adata.obs['kmeans'].astype(int).astype('category')
-            self.adata_manager.adata.obsm['kmeans_onehot']=numpy_onehot(self.adata_manager.adata.obs['kmeans'].cat.codes,num_classes=self.level_sizes[-1])
+            kmeans = sklearn.cluster.MiniBatchKMeans(n_clusters=target_leaf_count,init='k-means++',max_iter=1000,reassignment_ratio=0.001,n_init=100,random_state=0).fit(self.adata_manager.adata.obsm[dimension_reduction])
+            observed_leaf_count = np.unique(kmeans.labels_).shape[0]
+            if observed_leaf_count < target_leaf_count:
+                print(
+                    f"prepare_phase_2: only {observed_leaf_count} / {target_leaf_count} kmeans leaf clusters are populated; "
+                    "retaining empty leaves to keep model dimensions aligned."
+                )
+            self.adata_manager.adata.obs['kmeans'] = pd.Categorical(
+                kmeans.labels_.astype(int),
+                categories=np.arange(target_leaf_count),
+            )
+            self.adata_manager.adata.obsm['kmeans_onehot']=numpy_onehot(kmeans.labels_.astype(int),num_classes=target_leaf_count)
         else:
             self.adata_manager.adata.obs[cluster]=self.adata_manager.adata.obs[cluster].astype('category')
-            self.adata_manager.adata.obsm[cluster+'_onehot']=numpy_onehot(self.adata_manager.adata.obs[cluster].cat.codes,num_classes=self.level_sizes[-1])
+            observed_leaf_count = len(self.adata_manager.adata.obs[cluster].cat.categories)
+            if observed_leaf_count > target_leaf_count:
+                raise ValueError(
+                    f"Cluster column '{cluster}' has {observed_leaf_count} categories, "
+                    f"but level_sizes[-1] is {target_leaf_count}."
+                )
+            cluster_codes = self.adata_manager.adata.obs[cluster].cat.codes.to_numpy()
+            self.adata_manager.adata.obs[cluster] = pd.Categorical(
+                cluster_codes.astype(int),
+                categories=np.arange(target_leaf_count),
+            )
+            self.adata_manager.adata.obsm[cluster+'_onehot']=numpy_onehot(cluster_codes,num_classes=target_leaf_count)
         device=pyro.param('locs').device if device is None else device
         self.adata_manager.register_new_fields([make_field('taxon',('obsm',cluster+'_onehot'))])
         if dimension_reduction is not None:#For supervised Z register dr
@@ -242,6 +262,10 @@ class AntipodeTrainingMixin:
         if (epochs is not None) and (dimension_reduction is not None):
             self.pretrain_classifier(cluster=cluster,prefix=prefix,epochs=epochs,device=device)
         kmeans_means=group_aggr_anndata(self.adata_manager.adata,[cluster], agg_func=np.mean,layer=dimension_reduction,obsm=True)[0]
+        if kmeans_means.shape[0] != target_leaf_count:
+            raise RuntimeError(
+                f"prepare_phase_2 expected {target_leaf_count} leaf centroids, got {kmeans_means.shape[0]}."
+            )
         if 'locs' not in [x for x in pyro.get_param_store()]:
             print('quick init')
             self.train_phase(phase=1,max_steps=1,print_every=10000,num_particles=1,device=device, max_learning_rate=1e-10, one_cycle_lr=True, steps=0, batch_size=4)
