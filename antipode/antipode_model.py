@@ -126,6 +126,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.discov_plate = pyro.plate('discov_plate',self.num_discov,dim=-3)
         self.seccov_plate = pyro.plate('seccov_plate',self.num_seccov,dim=-3)
         self.batch_plate = pyro.plate('batch_plate',self.num_batch,dim=-3)
+        self.discov_da_plate = pyro.plate('discov_da_plate',self.num_discov,dim=-2)
         self.latent_plate = pyro.plate('latent_plate',self.num_latent,dim=-1)
         self.latent_plate2 = pyro.plate('latent_plate2',self.num_latent,dim=-2)
         self.label_plate = pyro.plate('label_plate',self.num_labels,dim=-2)
@@ -147,7 +148,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],
                                  [self.discov_plate,self.latent_plate2,self.var_plate],scale_multiplier=self.anc_prior_scalar)
         self.discov_da=MAPLaplaceModule(self,'discov_da',[self.num_discov,self.num_var],
-                                 [self.discov_plate,self.var_plate],init_val=self.discov_da_prior_loc,
+                                 [self.discov_da_plate,self.var_plate],init_val=self.discov_da_prior_loc,
                                  prior_loc=self.discov_da_prior_loc,scale_multiplier=self.anc_prior_scalar)
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],
                                   [self.latent_plate2,self.var_plate],
@@ -326,7 +327,11 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
 
             cur_discov_dm = oh_index1(discov_dm, discov_ind) if self.design_matrix else discov_dm[discov_ind]
             cur_batch_dm = oh_index1(batch_dm, batch_ind) if self.design_matrix else batch_dm[batch_ind]
-            cur_dcd = (oh_index(discov_da, discov) + dcd_intercept) if self.design_matrix else (discov_da[discov_ind] + dcd_intercept)
+            cur_dcd = (
+                oh_index(discov_da, discov) + dcd_intercept
+                if self.design_matrix
+                else (discov_da[discov_ind] + dcd_intercept)
+            )
             cur_seccov_dm=oh_index1(seccov_dm,seccov)
                  
             z=z+oh_index2(cur_discov_dm,taxon) + oh_index2(cur_seccov_dm,taxon) + oh_index2(cur_batch_dm,taxon)+(oh_index(locs_dynam,taxon*psi))
