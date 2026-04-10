@@ -21,7 +21,9 @@ def _make_minimal_adata(n_obs=4, n_genes=3):
 def test_train_phase_runs_on_minimal_data():
     pyro.clear_param_store()
     adata = _make_minimal_adata()
-    adata.obsm["discov_onehot"] = np.eye(2, dtype=np.float32)[
+    n_discov = 2
+    n_genes = adata.n_vars
+    adata.obsm["discov_onehot"] = np.eye(n_discov, dtype=np.float32)[
         adata.obs["discov"].cat.codes.to_numpy()
     ]
     adata.obsm["batch_onehot"] = np.eye(2, dtype=np.float32)[
@@ -40,6 +42,7 @@ def test_train_phase_runs_on_minimal_data():
         batch_embedder_hidden=[2],
         use_q_score=False,
         use_psi=False,
+        discov_real_means=torch.ones(n_discov, n_genes),
     )
     model.freeze_encoder = False
 

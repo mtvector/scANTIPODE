@@ -124,6 +124,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         # Initialize plates to be used during sampling
         self.var_plate = pyro.plate('var_plate',self.num_var,dim=-1)
         self.discov_plate = pyro.plate('discov_plate',self.num_discov,dim=-3)
+        self.discov_da_plate = pyro.plate('discov_da_plate',self.num_discov,dim=-2)
         self.seccov_plate = pyro.plate('seccov_plate',self.num_seccov,dim=-3)
         self.batch_plate = pyro.plate('batch_plate',self.num_batch,dim=-3)
         self.latent_plate = pyro.plate('latent_plate',self.num_latent,dim=-1)
@@ -147,7 +148,7 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
         self.dc=MAPLaplaceModule(self,'discov_dc',[self.num_discov,self.num_latent,self.num_var],
                                  [self.discov_plate,self.latent_plate2,self.var_plate],scale_multiplier=self.anc_prior_scalar)
         self.discov_da=MAPLaplaceModule(self,'discov_da',[self.num_discov,self.num_var],
-                                 [self.discov_plate,self.var_plate],init_val=self.discov_da_prior_loc,
+                                 [self.discov_da_plate,self.var_plate],init_val=self.discov_da_prior_loc,
                                  prior_loc=self.discov_da_prior_loc,scale_multiplier=self.anc_prior_scalar)
         self.zdw=MAPLaplaceModule(self,'z_decoder_weight',[self.num_latent,self.num_var],
                                   [self.latent_plate2,self.var_plate],
@@ -266,7 +267,6 @@ class ANTIPODE(PyroBaseModuleClass,AntipodeTrainingMixin, AntipodeSaveLoadMixin)
                 self.intercept_init.to(s.device),
             )
             discov_da = self.discov_da.model_sample(s, scale=fest([discov], -1))
-            discov_da = discov_da.squeeze(-2)
             level_edges=self.tree_edges.model_sample(s,approx=self.approx)
             quality_genes=self.qg.model_sample(s) if self.use_q_score else 0.
             
